@@ -460,7 +460,33 @@ func createVPCNetworking(svc *ec2.EC2) *string {
 		return nil
 	}
 	createSubnets(svc, vpcID)
+	addInternetGatewayToVPC(svc, vpcID)
+
 	return vpcID
+}
+
+func addInternetGatewayToVPC(svc *ec2.EC2, vpcID *string) {
+	params := &ec2.CreateInternetGatewayInput{}
+	resp, err := svc.CreateInternetGateway(params)
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		os.Exit(1)
+	}
+
+	params2 := &ec2.AttachInternetGatewayInput{
+		InternetGatewayId: resp.InternetGateway.InternetGatewayId, // Required
+		VpcId:             vpcID,                                  // Required
+	}
+	_, err2 := svc.AttachInternetGateway(params2)
+
+	if err2 != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err2.Error())
+		return
+	}
 }
 
 func createSubnets(svc *ec2.EC2, vpcID *string) {
@@ -907,8 +933,6 @@ func main() {
 		fmt.Printf("Creating ELB for %s", viper.GetString("elb-name"))
 		elbDNSName = createELB(svc, elbSvc, vpcID)
 	}
-
-	panic("STOP")
 
 	// Security Groups for kube.  Lookup for launch uses Tagged with KubernetesCluster=cluster-name
 	var discovery string
