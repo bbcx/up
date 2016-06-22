@@ -123,6 +123,12 @@ func getSubnets(svc *ec2.EC2) (subnetID *string) {
 		return nil
 	}
 
+	fmt.Println(resp)
+
+	if len(resp.Subnets) == 0 {
+		return nil
+	}
+
 	return resp.Subnets[0].SubnetId
 }
 
@@ -213,8 +219,8 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 		MinCount: aws.Int64(1),
 		//EbsOptimized:          aws.Bool(true),
 		IamInstanceProfile: &ec2.IamInstanceProfileSpecification{
-			Arn: aws.String(instanceProfileArn),
-			//Name: aws.String(viper.GetString("aws-instance-profile-master")),
+			//Arn: aws.String(instanceProfileArn),
+			Name: aws.String("kubernetes-master-" + viper.GetString("cluster-name")),
 		},
 		InstanceInitiatedShutdownBehavior: aws.String("terminate"),
 		InstanceType:                      aws.String("t2.nano"),
@@ -255,7 +261,8 @@ func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 		MinCount: aws.Int64(1),
 		//EbsOptimized:          aws.Bool(true),
 		IamInstanceProfile: &ec2.IamInstanceProfileSpecification{
-			Arn: aws.String(instanceProfileArn),
+			//Arn: aws.String(instanceProfileArn),
+			Name: aws.String("kubernetes-minion" + viper.GetString("cluster-name")),
 		},
 		InstanceInitiatedShutdownBehavior: aws.String("terminate"),
 		InstanceType:                      aws.String("t2.micro"),
@@ -580,6 +587,7 @@ func checkRole(roleName string) (arn *string) {
 			if *page.Roles[i].RoleName == roleName {
 				arn = page.Roles[i].Arn
 				foundRole = true
+
 			}
 		}
 		return lastpage || foundRole
