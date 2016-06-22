@@ -1,0 +1,105 @@
+#cloud-config
+write_files:
+  - path: /usr/local/bin/get_k8s_certs.sh
+    owner: root
+    permissions: 0755
+    content: |
+      #!/bin/bash -e
+      mkdir -p /etc/kubernetes/ssl
+      instance_id=$(curl 169.254.169.254/latest/meta-data/instance-id)
+      aws s3 cp s3://{{.SSLStorageBucket}}/${instance_id}-apiserver.pem /etc/kubernetes/ssl/apiserver.pem
+      aws s3 cp s3://{{.SSLStorageBucket}}/${instance_id}-apiserver-key.pem /etc/kubernetes/ssl/apiserver-key.pem
+      aws s3 cp s3://{{.SSLStorageBucket}}/${instance_id}-ca.pem /etc/kubernetes/ssl/ca.pem
+      chown kube:kube /etc/kubernetes/ssl/*.pem
+      chmod 0600 /etc/kubernetes/ssl/*.pem
+      systemctl start kube-apiserver
+      systemctl start kube-controller-manager
+      systemctl start kube-scheduler
+  - path: "/etc/kubernetes/apiserver"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      # The address on the local server to listen to.
+      KUBE_API_ADDRESS="--insecure-bind-address=127.0.0.1"
+
+      # Comma separated list of nodes in the etcd cluster
+      KUBE_ETCD_SERVERS="--etcd-servers=http://127.0.0.1:4001"
+
+      # Address range to use for services 
+      KUBE_SERVICE_ADDRESSES="--service-cluster-ip-range={{.ServiceClusterIPRange}}"
+
+      # default admission control policies
+      KUBE_ADMISSION_CONTROL="--admission-control=NamespaceLifecycle,NamespaceExists,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota"
+      
+      # Additional args to the apiserver (SSL)
+      KUBE_API_ARGS="--cloud-provider=aws --advertise-address=$private_ipv4 --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem --tls-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem --client-ca-file=/etc/kubernetes/ssl/ca.pem --service-account-key-file=/etc/kubernetes/ssl/apiserver-key.pem"
+      
+  - path: "/etc/kubernetes/config"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      # logging to stderr means we get it in the systemd journal
+      KUBE_LOGTOSTDERR="--logtostderr=true"
+      # journal message level, 0 is debug
+      KUBE_LOG_LEVEL="--v=0"
+      # Should this cluster be allowed to run privileged docker containers
+      KUBE_ALLOW_PRIV="--allow-privileged=true"
+      # How the controller-manager, scheduler find the apiserver
+      KUBE_MASTER="--master=http://127.0.0.1:8080"
+      # Etcd
+      KUBE_ETCD_SERVERS="http://$private_ipv4:2379"
+      
+  - path: "/etc/kubernetes/controller-manager"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      # Additional args to the controller-manager
+      KUBE_CONTROLLER_MANAGER_ARGS="--master=127.0.0.1:8080 --cluster-cidr={{.ClusterCIDR}} --allocate-node-cidrs=true --cloud-provider=aws --cluster-name={{.ClusterName}} --service-account-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem         --root-ca-file=/etc/kubernetes/ssl/ca.pem" 
+      
+  - path: "/etc/kubernetes/scheduler"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      # Additional args to the scheduler
+      KUBE_SCHEDULER_ARGS="--master=127.0.0.1:8080"
+      
+  - path: "/usr/lib/systemd/system/etcd2.service"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      [Unit]
+      Description=etcd key-value store
+      Documentation=https://github.com/coreos/etcd
+      [Service]
+      TimeoutStartSec=0
+      User=etcd
+      Type=notify
+      Environment=ETCD_DATA_DIR=/var/lib/etcd
+      Environment=ETCD_NAME=%H
+      EnvironmentFile=-/etc/conf.d/etcd
+      ExecStart=/usr/bin/etcd
+      Restart=always
+      RestartSec=10s
+      LimitNOFILE=40000
+      [Install]
+      WantedBy=multi-user.target
+coreos:
+  etcd2:
+    discovery: {{.Discovery}} 
+    advertise-client-urls: http://$private_ipv4:2379,http://$private_ipv4:4001
+    initial-advertise-peer-urls: http://$private_ipv4:2380
+    listen-client-urls: http://0.0.0.0:2379,http://0.0.0.0:4001
+    listen-peer-urls: http://$private_ipv4:2380
+  units:
+    - name: etcd2.service
+      command: start
+    - name: get-k8s-certs.service
+      command: start
+      content: |
+        [Unit]
+        Description=get k8s certs from s3
+        Requires=etcd2.service
+        After=network.target etcd2.service
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/get_k8s_certs.sh

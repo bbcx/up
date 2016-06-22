@@ -1,0 +1,91 @@
+#cloud-config
+write_files:
+  - path: /usr/local/bin/get_k8s_certs.sh
+    owner: root
+    permissions: 0755
+    content: |
+      #!/bin/bash -e
+      mkdir -p /etc/kubernetes/ssl
+      instance_id=$(curl 169.254.169.254/latest/meta-data/instance-id)
+      aws s3 cp s3://{{.SSLStorageBucket}}/${instance_id}-minion.pem /etc/kubernetes/ssl/minion.pem
+      aws s3 cp s3://{{.SSLStorageBucket}}/${instance_id}-minion-key.pem /etc/kubernetes/ssl/minion-key.pem
+      aws s3 cp s3://{{.SSLStorageBucket}}/${instance_id}-ca.pem /etc/kubernetes/ssl/ca.pem
+      chown kube:kube /etc/kubernetes/ssl/*.pem
+      chmod 0600 /etc/kubernetes/ssl/*.pem
+      systemctl start kubelet
+      systemctl start kube-proxy
+  - path: /etc/kubernetes/config
+    owner: root
+    permissions: 0755
+    content: |
+      KUBE_LOGTOSTDERR="--logtostderr=true"
+      # journal message level, 0 is debug
+      KUBE_LOG_LEVEL="--v=0"
+      KUBE_ALLOW_PRIV="--allow-privileged=true"
+      KUBE_MASTER="https://{{.ELBDNSName}}"
+  - path: /etc/kubernetes/kubelet
+    owner: root
+    permissions: 0755
+    content: |
+      KUBELET_ADDRESS="--address=127.0.0.1"
+      KUBELET_HOSTNAME="--hostname-override=127.0.0.1"
+      KUBELET_API_SERVER="--api-servers=https://{{.ELBDNSName}}"
+      KUBELET_ARGS="--cloud-provider=aws --kubeconfig=/var/lib/kubelet/kubeconfig --non-masquerade-cidr={{.ClusterCIDR}} --cluster-dns={{.ClusterDNS}} --configure-cbr0=true --cluster-domain=cluster.local --tls-cert-file=/etc/kubernetes/ssl/minion.pem --tls-private-key-file=/etc/kubernetes/ssl/minion-key.pem"
+  - path: /etc/kubernetes/proxy
+    owner: root
+    permissions: 0755
+    content: |
+      KUBE_PROXY_ARGS="--cluster-cidr={{.ClusterCIDR}} --proxy-mode=iptables --kubeconfig=/var/lib/kubelet/kubeconfig"
+  - path: /var/lib/kubelet/kubeconfig
+    owner: root
+    permissions: 0755
+    content: |
+      apiVersion: v1
+      kind: Config
+      clusters:
+        - cluster:
+            certificate-authority: /etc/kubernetes/ssl/ca.pem
+            server: https://{{.ELBDNSName}}
+          name: kubernetes
+      contexts:
+        - context:
+            cluster: kubernetes
+            user: kubelet
+          name: kubelet-to-kubernetes
+      current-context: kubelet-to-kubernetes
+      users:
+        - name: kubelet
+          user:
+            client-certificate: /etc/kubernetes/ssl/minion.pem
+            client-key: /etc/kubernetes/ssl/minion-key.pem
+coreos:
+  units:
+    - name: docker.service
+      command: start
+      content: |
+        [Unit]
+        Description=Docker Application Container Engine
+        Documentation=https://docs.docker.com
+        After=network.target docker.socket
+        Requires=docker.socket
+        [Service]
+        Type=notify
+        ExecStartPre=-/usr/bin/brctl addbr cbr0
+        ExecStart=/usr/bin/docker daemon -H fd:// -s=overlay --bridge=cbr0 --iptables=false --ip-masq=false --log-level=warn 
+        MountFlags=slave
+        LimitNOFILE=1048576
+        LimitNPROC=1048576
+        LimitCORE=infinity
+        TimeoutStartSec=0
+        Delegate=yes
+        [Install]
+        WantedBy=multi-user.target
+    - name: get-k8s-certs.service
+      command: start
+      content: |
+        [Unit]
+        Description=get k8s certs from s3
+        After=network.target
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/local/bin/get_k8s_certs.sh
