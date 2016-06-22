@@ -194,11 +194,11 @@ func assocMasterWithELB(svc *elb.ELB, instanceID *string) {
 	}
 }
 
-func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string) *string {
+func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcID *string) *string {
 	masterSecurityGroupID := getSecurityGroup(svc, "Master")
 
 	if masterSecurityGroupID == nil {
-		panic("Fatal: could not lookup security groups for this cluster.")
+		createSecurityGroup(svc, "Master", vpcID)
 	}
 
 	subnetID := getSubnets(svc)
@@ -236,11 +236,11 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string) *str
 	return resp.Instances[0].InstanceId
 }
 
-func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string) (*string, *string) {
+func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcID *string) (*string, *string) {
 	securityGroupID := getSecurityGroup(svc, "Minion")
 
 	if securityGroupID == nil {
-		panic("Fatal: could not lookup security groups for this cluster.")
+		createSecurityGroup(svc, "Minion", vpcID)
 	}
 
 	subnetID := getSubnets(svc)
@@ -960,7 +960,7 @@ func main() {
 		times, _ := strconv.ParseInt(viper.GetString("master-cluster-size"), 10, 0)
 		var mloop int64
 		for mloop = 0; mloop < times; mloop++ {
-			masterInstanceID := launchMaster(svc, masterUserDataEncoded, *instanceProfileArnMaster)
+			masterInstanceID := launchMaster(svc, masterUserDataEncoded, *instanceProfileArnMaster, vpcID)
 
 			masterSSLSettings := sslConf{
 				"", //un-necessary on master
@@ -993,7 +993,7 @@ func main() {
 		var mloop int64
 		for mloop = 0; mloop < times; mloop++ {
 			// Launch Minion.
-			minionPrivateIP, minionInstanceID := launchMinion(svc, minionUserDataEncoded, *instanceProfileArnMinion)
+			minionPrivateIP, minionInstanceID := launchMinion(svc, minionUserDataEncoded, *instanceProfileArnMinion, vpcID)
 
 			// generate openssl-worker.cnf template in certs dir
 			minionSSLSettings := sslConf{
