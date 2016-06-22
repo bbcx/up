@@ -587,6 +587,23 @@ func checkPolicy(shortname string) (arn *string) {
 	return arn
 }
 
+func getELBDNSName(elbsvc *elb.ELB) (elbDNSName *string) {
+	params := &elb.DescribeLoadBalancersInput{
+		PageSize: aws.Int64(1),
+		LoadBalancerNames: []*string{
+			aws.String(viper.GetString("elb-name")),
+		},
+	}
+	resp, err := elbsvc.DescribeLoadBalancers(params)
+
+	if err != nil {
+		//somethingwong
+		return nil
+	}
+
+	return resp.LoadBalancerDescriptions[0].DNSName
+}
+
 func createPolicy(policyTemplateFile string, shortname string) (arn *string) {
 	masterTemplateTextBuf, err := ioutil.ReadFile(policyTemplateFile)
 
@@ -881,6 +898,8 @@ func main() {
 	if putObjS3("preflight-check1.0", "preflight-check") == false {
 		panic("Fatal: Unable to write to s3 bucket.  Please check permissions and try again.")
 	}
+
+	// TODO: needs Internet Gateway
 
 	// ELB for master nodes
 	elbDNSName := getELBDNSName(elbSvc)
