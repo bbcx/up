@@ -119,6 +119,7 @@ func getSubnets(svc *ec2.EC2) (subnetID *string) {
 	resp, err := svc.DescribeSubnets(params)
 
 	if err != nil {
+		fmt.Println("error during getSubnets!")
 		fmt.Println(err.Error())
 		return nil
 	}
@@ -126,6 +127,7 @@ func getSubnets(svc *ec2.EC2) (subnetID *string) {
 	fmt.Println(resp)
 
 	if len(resp.Subnets) == 0 {
+		fmt.Println("error during getSubnets, zero subnets found!")
 		return nil
 	}
 
@@ -204,7 +206,7 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 	masterSecurityGroupID := getSecurityGroup(svc, "Master")
 
 	if masterSecurityGroupID == nil {
-		createSecurityGroup(svc, "Master", vpcID)
+		masterSecurityGroupID = createSecurityGroup(svc, "Master", vpcID)
 	}
 
 	subnetID := getSubnets(svc)
@@ -246,7 +248,7 @@ func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 	securityGroupID := getSecurityGroup(svc, "Minion")
 
 	if securityGroupID == nil {
-		createSecurityGroup(svc, "Minion", vpcID)
+		securityGroupID = createSecurityGroup(svc, "Minion", vpcID)
 	}
 
 	subnetID := getSubnets(svc)
@@ -262,7 +264,7 @@ func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 		//EbsOptimized:          aws.Bool(true),
 		IamInstanceProfile: &ec2.IamInstanceProfileSpecification{
 			//Arn: aws.String(instanceProfileArn),
-			Name: aws.String("kubernetes-minion" + viper.GetString("cluster-name")),
+			Name: aws.String("kubernetes-minion-" + viper.GetString("cluster-name")),
 		},
 		InstanceInitiatedShutdownBehavior: aws.String("terminate"),
 		InstanceType:                      aws.String("t2.micro"),
@@ -303,7 +305,7 @@ func createS3Bucket() {
 		// Print the error, cast err to awserr.Error to get the Code and
 		// Message from an error.
 		fmt.Println(err.Error())
-		fmt.Println("S3 bucket already exists? continuing.")
+		fmt.Println("S3 bucket already exists.  Continuing.")
 		return
 	}
 
@@ -424,7 +426,7 @@ func createVPCNetworking(svc *ec2.EC2) *string {
 		// Message from an error.
 		fmt.Println(resp)
 		fmt.Println(err.Error())
-		return nil
+		os.Exit(1)
 	}
 
 	vpcID := resp.Vpc.VpcId
@@ -450,7 +452,7 @@ func createVPCNetworking(svc *ec2.EC2) *string {
 		return nil
 	}
 
-	fmt.Println("New route table: " + *rtResp.RouteTables[0].RouteTableId)
+	fmt.Println("Got route table: " + *rtResp.RouteTables[0].RouteTableId)
 
 	// Tag the VPC and route tables
 	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
@@ -467,12 +469,13 @@ func createVPCNetworking(svc *ec2.EC2) *string {
 		return nil
 	}
 	createSubnets(svc, vpcID)
-	addInternetGatewayToVPC(svc, vpcID)
+	IGWID := addInternetGatewayToVPC(svc, vpcID)
+	createRouteForIGW(svc, IGWID, rtResp.RouteTables[0].RouteTableId)
 
 	return vpcID
 }
 
-func addInternetGatewayToVPC(svc *ec2.EC2, vpcID *string) {
+func addInternetGatewayToVPC(svc *ec2.EC2, vpcID *string) *string {
 	params := &ec2.CreateInternetGatewayInput{}
 	resp, err := svc.CreateInternetGateway(params)
 	if err != nil {
@@ -492,8 +495,30 @@ func addInternetGatewayToVPC(svc *ec2.EC2, vpcID *string) {
 		// Print the error, cast err to awserr.Error to get the Code and
 		// Message from an error.
 		fmt.Println(err2.Error())
+		os.Exit(1)
+	}
+	return resp.InternetGateway.InternetGatewayId
+}
+
+func createRouteForIGW(svc *ec2.EC2, IGWID *string, routeTableID *string) {
+	params := &ec2.CreateRouteInput{
+		DestinationCidrBlock: aws.String("0.0.0.0/0"), // Required
+		RouteTableId:         routeTableID,            // Required
+		GatewayId:            IGWID,
+	}
+	resp, err := svc.CreateRoute(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println("Error creating route for IGW.")
+		fmt.Println(err.Error())
+		os.Exit(1)
 		return
 	}
+
+	// Pretty-print the response data.
+	fmt.Println(resp)
 }
 
 func createSubnets(svc *ec2.EC2, vpcID *string) {
@@ -529,6 +554,31 @@ func createSubnets(svc *ec2.EC2, vpcID *string) {
 			fmt.Println(err.Error())
 			return
 		}
+
+		// Set auto-assign public IP on subnet
+		params2 := &ec2.ModifySubnetAttributeInput{
+			SubnetId: resp.Subnet.SubnetId,
+			MapPublicIpOnLaunch: &ec2.AttributeBooleanValue{
+				Value: aws.Bool(true),
+			},
+		}
+		_, err2 := svc.ModifySubnetAttribute(params2)
+
+		if err2 != nil {
+			fmt.Println("Auto assign public IP failed for subnet.")
+			fmt.Println(err.Error())
+			os.Exit(1)
+		}
+
+		if err != nil {
+			// Print the error, cast err to awserr.Error to get the Code and
+			// Message from an error.
+			fmt.Println(err.Error())
+			return
+		}
+
+		// Pretty-print the response data.
+		fmt.Println(resp)
 
 		// Tag the subnets
 		_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
@@ -755,6 +805,109 @@ func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 	return iArn
 }
 
+func setupSecurityGroupsAuth(svc *ec2.EC2, masterSecGroupID *string, minionSecGroupID *string, ELBSecurityGroupID *string) {
+	// Setup Master SSH
+	paramsMasterSSH := &ec2.AuthorizeSecurityGroupIngressInput{
+		CidrIp:     aws.String("0.0.0.0/0"),
+		FromPort:   aws.Int64(22),
+		GroupId:    masterSecGroupID,
+		IpProtocol: aws.String("TCP"),
+		ToPort:     aws.Int64(22),
+	}
+	_, errMasterSSH := svc.AuthorizeSecurityGroupIngress(paramsMasterSSH)
+	if errMasterSSH != nil {
+		fmt.Println("Could not authorize security group for Master SSH")
+		os.Exit(1)
+	}
+
+	// Setup Minion SSH
+	paramsMinionSSH := &ec2.AuthorizeSecurityGroupIngressInput{
+		CidrIp:     aws.String("0.0.0.0/0"),
+		FromPort:   aws.Int64(22),
+		GroupId:    minionSecGroupID,
+		IpProtocol: aws.String("TCP"),
+		ToPort:     aws.Int64(22),
+	}
+	_, errMinionSSH := svc.AuthorizeSecurityGroupIngress(paramsMinionSSH)
+	if errMinionSSH != nil {
+		fmt.Println("Could not authorize security group for Minion SSH")
+		os.Exit(1)
+	}
+
+	// Setup Minion to Master
+	params1 := &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: masterSecGroupID,
+		IpPermissions: []*ec2.IpPermission{
+			{ // Required
+				FromPort:   aws.Int64(0),
+				IpProtocol: aws.String("TCP"),
+				ToPort:     aws.Int64(65535),
+				UserIdGroupPairs: []*ec2.UserIdGroupPair{
+					{ // Required
+						GroupId: minionSecGroupID,
+					},
+				},
+			},
+		},
+	}
+	_, err1 := svc.AuthorizeSecurityGroupIngress(params1)
+
+	if err1 != nil {
+		fmt.Println(err1.Error())
+		fmt.Println("Could not authorize security group for Minion to Master")
+		os.Exit(1)
+	}
+
+	// Setup Master to Minion
+	params2 := &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: minionSecGroupID,
+		IpPermissions: []*ec2.IpPermission{
+			{ // Required
+				FromPort:   aws.Int64(0),
+				IpProtocol: aws.String("TCP"),
+				ToPort:     aws.Int64(65535),
+				UserIdGroupPairs: []*ec2.UserIdGroupPair{
+					{ // Required
+						GroupId: masterSecGroupID,
+					},
+				},
+			},
+		},
+	}
+	_, err2 := svc.AuthorizeSecurityGroupIngress(params2)
+
+	if err2 != nil {
+		fmt.Println(err2.Error())
+		fmt.Println("Could not authorize security group for Master to Minion")
+		os.Exit(1)
+	}
+
+	// Setup ELB to Master
+	params3 := &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: masterSecGroupID,
+		IpPermissions: []*ec2.IpPermission{
+			{ // Required
+				FromPort:   aws.Int64(6443),
+				IpProtocol: aws.String("TCP"),
+				ToPort:     aws.Int64(6443),
+				UserIdGroupPairs: []*ec2.UserIdGroupPair{
+					{ // Required
+						GroupId: ELBSecurityGroupID,
+					},
+				},
+			},
+		},
+	}
+	_, err3 := svc.AuthorizeSecurityGroupIngress(params3)
+
+	if err3 != nil {
+		fmt.Println(err3.Error())
+		fmt.Println("Could not authorize security group for Master to Minion")
+		os.Exit(1)
+	}
+
+}
+
 func createSecurityGroup(svc *ec2.EC2, kindOf string, vpcID *string) (securityGroupID *string) {
 	groupName := "kubernetes-" + kindOf + "-" + viper.GetString("cluster-name")
 	params := &ec2.CreateSecurityGroupInput{
@@ -813,8 +966,8 @@ func createELB(svc *ec2.EC2, elbsvc *elb.ELB, vpcID *string) (elbDNSName *string
 	params := &elb.CreateLoadBalancerInput{
 		Listeners: []*elb.Listener{
 			{
-				InstancePort:     aws.Int64(443),
-				LoadBalancerPort: aws.Int64(6443),
+				InstancePort:     aws.Int64(6443),
+				LoadBalancerPort: aws.Int64(443),
 				Protocol:         aws.String("TCP"),
 				InstanceProtocol: aws.String("TCP"),
 			},
@@ -940,6 +1093,29 @@ func main() {
 	if elbDNSName == nil {
 		fmt.Printf("Creating ELB for %s", viper.GetString("elb-name"))
 		elbDNSName = createELB(svc, elbSvc, vpcID)
+	}
+
+	// Ensure Security groups are created and authorized
+	authorize := false
+	masterSecurityGroupID := getSecurityGroup(svc, "Master")
+	if masterSecurityGroupID == nil {
+		masterSecurityGroupID = createSecurityGroup(svc, "Master", vpcID)
+		authorize = true
+	}
+	minionSecurityGroupID := getSecurityGroup(svc, "Minion")
+	if minionSecurityGroupID == nil {
+		minionSecurityGroupID = createSecurityGroup(svc, "Minion", vpcID)
+		authorize = true
+	}
+	// Create or lookup elb security group
+	ELBSecurityGroupID := getSecurityGroup(svc, "ELB")
+	if ELBSecurityGroupID == nil {
+		fmt.Printf("Creating security group for Kubernetes Master ELB.")
+		ELBSecurityGroupID = createSecurityGroup(svc, "ELB", vpcID)
+		authorize = true
+	}
+	if authorize {
+		setupSecurityGroupsAuth(svc, minionSecurityGroupID, masterSecurityGroupID, ELBSecurityGroupID)
 	}
 
 	// Security Groups for kube.  Lookup for launch uses Tagged with KubernetesCluster=cluster-name
