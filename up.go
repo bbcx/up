@@ -1144,8 +1144,8 @@ func deleteSecGroup(svc *ec2.EC2, secGroupID *string) bool {
 	return true
 }
 
-func deleteIGW(svc *ec2.EC2) {
-	params := *ec2.DescribeInternetGatewaysInput{
+func deleteIGW(svc *ec2.EC2) (bool) {
+	params := &ec2.DescribeInternetGatewaysInput{
 		Filters: []*ec2.Filter{
 			{
 				Name: aws.String("tag:KubernetesCluster"),
@@ -1156,11 +1156,146 @@ func deleteIGW(svc *ec2.EC2) {
 		},
 	}
 
-	svc.DescribeInternetGateways(params)
+	resp, err := svc.DescribeInternetGateways(params)
+	if err != nil {
+		fmt.Println("could not lookup IGW")
+		fmt.Println(err)
+		return false
+	}
+
+	paramsDelete := &ec2.DeleteInternetGatewayInput{
+		InternetGatewayId: resp.InternetGateways[0].InternetGatewayId,
+	}
+	
+	_, errDelete := svc.DeleteInternetGateway(paramsDelete)
+
+	if errDelete != nil {
+		fmt.Println("error deleting IGW")
+		fmt.Println(errDelete)
+		return false
+	}
+
+	return true
 }
 
+func deleteRouteTable(svc *ec2.EC2) bool {
+	params := &ec2.DescribeRouteTablesInput{
+		Filters: []*ec2.Filter{
+			{
+				Name: aws.String("tag:KubernetesCluster"),
+				Values: []*string{
+					aws.String(viper.GetString("cluster-name")),
+				},
+			},
+		},
+	}
+
+	resp, err := svc.DescribeRouteTables(params)
+
+	if err != nil {
+		fmt.Println("error describing route tables")
+		fmt.Println(err)
+		return false
+	}
+
+	paramsDelete := &ec2.DeleteRouteTableInput{
+		RouteTableId: resp.RouteTables[0].RouteTableId,
+	}
+
+	_, errDelete := svc.DeleteRouteTable(paramsDelete)
+
+	if errDelete != nil {
+		fmt.Println("failed to delete route table")
+		fmt.Println(errDelete)
+		return false
+	}
+	return true
+}
+
+func deleteDhcpOptionSet(svc *ec2.EC2) bool {
+	params := &ec2.DescribeDhcpOptionsInput{
+		Filters: []*ec2.Filter{
+			{
+				Name: aws.String("tag:KubernetesCluster"),
+				Values: []*string{
+					aws.String(viper.GetString("cluster-name")),
+				},
+			},
+		},
+	}
+
+	resp, err := svc.DescribeDhcpOptions(params)
+
+	if err != nil {
+		fmt.Println("error describing dhcp option sets")
+		fmt.Println(err)
+		return false
+	}
+
+	paramsDelete := &ec2.DeleteDhcpOptionsInput{
+		DhcpOptionsId: resp.DhcpOptions[0].DhcpOptionsId,
+	}
+
+	_, respErr := svc.DeleteDhcpOptions(paramsDelete)
+
+	if respErr != nil {
+		fmt.Println("error deleteing dhcp options set")
+		fmt.Println(respErr)
+		return false
+	}
+
+	return true
+}
+
+func deleteSubnet(svc *ec2.EC2, subnetID *string) bool {
+	params := &ec2.DeleteSubnetInput{
+		SubnetId: subnetID,
+	}
+
+	resp, err := svc.DeleteSubnet(params)
+
+	if err != nil {
+		fmt.Println("error deleting subnet")
+		fmt.Println(err)
+		return false
+	}
+
+	return true
+}
+
+func deleteSubnets(svc *ec2.EC2) bool {
+	params := &ec2.DescribeSubnetsInput{
+		Filters: []*ec2.Filter{
+			{
+				Name: aws.String("tag:KubernetesCluster"),
+				Values: []*string{
+					aws.String(viper.GetString("cluster-name")),
+				},
+			},
+		},
+	}
+
+	resp, err := svc.DescribeSubnets(params)
+
+	if err != nil {
+		fmt.Println("error describing subnets")
+		fmt.Println(err)
+		return false
+	}
+
+	allSuccess := true
+	for i := 0; i < len(resp.Subnets); i++ {
+		if deleteSubnet(svc, resp.Subnets[i].SubnetId) == false {
+			allSuccess = false
+		}
+	}
+
+	return allSuccess
+}
+
+
 func main() {
-	// Viper configuration engine
+	
 	viper.SetConfigName("config")
 	viper.AddConfigPath(".")
 	viper.SetEnvPrefix("BB")
@@ -1212,10 +1347,13 @@ func main() {
 		deleteIGW(svc)
 
 		// Route Table (tagged)
+		deleteRouteTable(svc)
 
 		// Dhcp Option set (tagged)
+		deleteDhcpOptionSet(svc)
 
 		// All clear for Subnet delete (tagged)
+		deleteSubnets(svc)
 
 		//teardown VPC
 		deleteVPC(svc)
