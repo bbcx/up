@@ -124,8 +124,6 @@ func getSubnets(svc *ec2.EC2) (subnetID *string) {
 		return nil
 	}
 
-	fmt.Println(resp)
-
 	if len(resp.Subnets) == 0 {
 		fmt.Println("error during getSubnets, zero subnets found!")
 		return nil
@@ -240,8 +238,46 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 		return nil
 	}
 
+	tagIt(svc, resp.Instances[0].InstanceId)
+	tagName(svc, resp.Instances[0].InstanceId, "k8sMaster-"+viper.GetString("cluster-name"))
 	// Pretty-print the response data
 	return resp.Instances[0].InstanceId
+}
+
+// Add KubernetesCluster=<clustername> tag to a resource
+func tagIt(svc *ec2.EC2, ID *string) bool {
+	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
+		Resources: []*string{ID},
+		Tags: []*ec2.Tag{
+			{
+				Key:   aws.String("KubernetesCluster"),
+				Value: aws.String(viper.GetString("cluster-name")),
+			},
+		},
+	})
+	if errtag != nil {
+		fmt.Println("Could not create tags for ", *ID, errtag)
+		return false
+	}
+	return true
+}
+
+// Add Name= tag to a resource
+func tagName(svc *ec2.EC2, ID *string, name string) bool {
+	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
+		Resources: []*string{ID},
+		Tags: []*ec2.Tag{
+			{
+				Key:   aws.String("Name"),
+				Value: aws.String(name),
+			},
+		},
+	})
+	if errtag != nil {
+		fmt.Println("Could not create tags for ", *ID, errtag)
+		return false
+	}
+	return true
 }
 
 func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcID *string) (*string, *string) {
@@ -282,6 +318,9 @@ func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 		return nil, nil
 	}
 
+	tagIt(svc, resp.Instances[0].InstanceId)
+	tagName(svc, resp.Instances[0].InstanceId, "k8sMinion-"+viper.GetString("cluster-name"))
+
 	return resp.Instances[0].PrivateIpAddress, resp.Instances[0].InstanceId
 }
 
@@ -299,7 +338,7 @@ func createS3Bucket() {
 		//GrantWrite:       aws.String("GrantWrite"),
 		//GrantWriteACP:    aws.String("GrantWriteACP"),
 	}
-	resp, err := svc.CreateBucket(params)
+	_, err := svc.CreateBucket(params)
 
 	if err != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
@@ -308,9 +347,6 @@ func createS3Bucket() {
 		fmt.Println("S3 bucket already exists.  Continuing.")
 		return
 	}
-
-	// Pretty-print the response data.
-	fmt.Println(resp)
 }
 
 func putObjS3(key string, content string) (success bool) {
@@ -342,7 +378,7 @@ func generateSSL(fileTemplate string, sslSettings sslConf, generateCommand strin
 
 	f, err := os.Create(viper.GetString("certificate-path") + "/" + name + "-openssl.cnf")
 	if err != nil {
-		log.Println("create file: ", err)
+		fmt.Println("create file: ", err)
 		panic("could not write file")
 	}
 
@@ -381,6 +417,69 @@ func generateSSL(fileTemplate string, sslSettings sslConf, generateCommand strin
 
 	os.Chdir(parentDir)
 	return string(apiPem), string(apiKey), string(ca)
+}
+
+func deleteInstances(svc *ec2.EC2) bool {
+	var ourTag = viper.GetString("cluster-name")
+	// Instances with our cluster-name
+	// Instances with a state != terminated
+	params := &ec2.DescribeInstancesInput{
+		Filters: []*ec2.Filter{
+			{
+				Name: aws.String("tag:KubernetesCluster"),
+				Values: []*string{
+					aws.String(ourTag),
+				},
+			},
+			{
+				Name: aws.String("instance-state-name"),
+				Values: []*string{
+					aws.String("running"),
+					aws.String("pending"),
+					aws.String("shutting-down"),
+					aws.String("stopping"),
+					aws.String("stopped"),
+				},
+			},
+		},
+	}
+	resp, err := svc.DescribeInstances(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		fmt.Println(err.Error())
+		return false
+	}
+
+	// Pretty-print the response data.
+	if len(resp.Reservations) == 0 {
+		return false
+	}
+
+	for i := 0; i < len(resp.Reservations); i++ {
+		fmt.Println(*resp.Reservations[i].Instances[0].InstanceId)
+		terminateInstance(svc, resp.Reservations[i].Instances[0].InstanceId)
+	}
+	return true
+}
+
+func terminateInstance(svc *ec2.EC2, instanceID *string) bool {
+	params := &ec2.TerminateInstancesInput{
+		InstanceIds: []*string{
+			instanceID,
+		},
+	}
+
+	_, err := svc.TerminateInstances(params)
+
+	if err != nil {
+		fmt.Println("Terminate instances failed.")
+		fmt.Println(err)
+		return false
+	}
+
+	return true
 }
 
 // Lookup vpc (just to ensure it exists)
@@ -455,19 +554,9 @@ func createVPCNetworking(svc *ec2.EC2) *string {
 	fmt.Println("Got route table: " + *rtResp.RouteTables[0].RouteTableId)
 
 	// Tag the VPC and route tables
-	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
-		Resources: []*string{vpcID, rtResp.RouteTables[0].RouteTableId},
-		Tags: []*ec2.Tag{
-			{
-				Key:   aws.String("KubernetesCluster"),
-				Value: aws.String(viper.GetString("cluster-name")),
-			},
-		},
-	})
-	if errtag != nil {
-		log.Println("Could not create tags for vpc", *vpcID, errtag)
-		return nil
-	}
+	tagIt(svc, vpcID)
+	tagIt(svc, rtResp.RouteTables[0].RouteTableId)
+
 	createSubnets(svc, vpcID)
 	IGWID := addInternetGatewayToVPC(svc, vpcID)
 	createRouteForIGW(svc, IGWID, rtResp.RouteTables[0].RouteTableId)
@@ -497,6 +586,7 @@ func addInternetGatewayToVPC(svc *ec2.EC2, vpcID *string) *string {
 		fmt.Println(err2.Error())
 		os.Exit(1)
 	}
+	tagIt(svc, resp.InternetGateway.InternetGatewayId)
 	return resp.InternetGateway.InternetGatewayId
 }
 
@@ -688,6 +778,20 @@ func getELBDNSName(elbsvc *elb.ELB) (elbDNSName *string) {
 	return resp.LoadBalancerDescriptions[0].DNSName
 }
 
+func deleteMasterELB(elbsvc *elb.ELB) bool {
+	params := &elb.DeleteLoadBalancerInput{
+		LoadBalancerName: aws.String(viper.GetString("elb-name")),
+	}
+
+	_, err := elbsvc.DeleteLoadBalancer(params)
+	if err != nil {
+		fmt.Println("Error deleteing load balancer.")
+		fmt.Println(err)
+	}
+
+	return true
+}
+
 func createPolicy(policyTemplateFile string, shortname string) (arn *string) {
 	masterTemplateTextBuf, err := ioutil.ReadFile(policyTemplateFile)
 
@@ -834,8 +938,8 @@ func setupSecurityGroupsAuth(svc *ec2.EC2, masterSecGroupID *string, minionSecGr
 		os.Exit(1)
 	}
 
-	// Setup Minion to Master
-	params1 := &ec2.AuthorizeSecurityGroupIngressInput{
+	// Setup Minion to Master  TODO: minion doesn't need this?
+	/*params1 := &ec2.AuthorizeSecurityGroupIngressInput{
 		GroupId: masterSecGroupID,
 		IpPermissions: []*ec2.IpPermission{
 			{ // Required
@@ -856,7 +960,7 @@ func setupSecurityGroupsAuth(svc *ec2.EC2, masterSecGroupID *string, minionSecGr
 		fmt.Println(err1.Error())
 		fmt.Println("Could not authorize security group for Minion to Master")
 		os.Exit(1)
-	}
+	} */
 
 	// Setup Master to Minion
 	params2 := &ec2.AuthorizeSecurityGroupIngressInput{
@@ -906,6 +1010,30 @@ func setupSecurityGroupsAuth(svc *ec2.EC2, masterSecGroupID *string, minionSecGr
 		os.Exit(1)
 	}
 
+	// Setup ELB Public 443
+	params4 := &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: ELBSecurityGroupID,
+		IpPermissions: []*ec2.IpPermission{
+			{ // Required
+				FromPort:   aws.Int64(443),
+				IpProtocol: aws.String("TCP"),
+				ToPort:     aws.Int64(443),
+				IpRanges: []*ec2.IpRange{
+					{
+						CidrIp: aws.String("0.0.0.0/0"),
+					},
+				},
+			},
+		},
+	}
+	_, err4 := svc.AuthorizeSecurityGroupIngress(params4)
+
+	if err4 != nil {
+		fmt.Println("Could not authorize security group ELB access 443")
+		fmt.Println(err4)
+		os.Exit(1)
+	}
+
 }
 
 func createSecurityGroup(svc *ec2.EC2, kindOf string, vpcID *string) (securityGroupID *string) {
@@ -924,9 +1052,6 @@ func createSecurityGroup(svc *ec2.EC2, kindOf string, vpcID *string) (securityGr
 		os.Exit(1)
 		return
 	}
-
-	// Pretty-print the response data.
-	fmt.Println(resp)
 
 	securityGroupID = resp.GroupId
 
@@ -1004,6 +1129,21 @@ func createELB(svc *ec2.EC2, elbsvc *elb.ELB, vpcID *string) (elbDNSName *string
 
 }
 
+func deleteSecGroup(svc *ec2.EC2, secGroupID *string) bool {
+	params := &ec2.DeleteSecurityGroupInput{
+		GroupId: secGroupID,
+	}
+
+	_, err := svc.DeleteSecurityGroup(params)
+	if err != nil {
+		fmt.Println("error deleting security group")
+		fmt.Println(err)
+		return false
+	}
+
+	return true
+}
+
 func main() {
 	// Viper configuration engine
 	viper.SetConfigName("config")
@@ -1033,8 +1173,37 @@ func main() {
 	elbSvc := elb.New(session.New(), &aws.Config{Region: aws.String(viper.GetString("region"))})
 
 	if *action == "delete" {
+		//teardown: TODO: IAM Policies, IAM Roles
+
+		// start with instances
+		deleteInstances(svc)
+
+		// then elbs
+		// TODO: teardown ELBs that were created by K8S controller also (tags look slightly wrong on these (missing cluster-name))
+		deleteMasterELB(elbSvc)
+
+		// ToDO: wait for instances and stuff to die off before deleting or they can't be deleted.
+		// Security Groups
+		masterSecGroupID := getSecurityGroup(svc, "Master")
+		deleteSecGroup(svc, masterSecGroupID)
+
+		minionSecGroupID := getSecurityGroup(svc, "Minion")
+		deleteSecGroup(svc, minionSecGroupID)
+
+		elbSecGroupID := getSecurityGroup(svc, "ELB")
+		deleteSecGroup(svc, elbSecGroupID)
+
+		// IGW (tagged)
+
+		// Route Table (tagged)
+
+		// Dhcp Option set (tagged)
+
+		// All clear for Subnet delete (tagged)
+
 		//teardown VPC
 		deleteVPC(svc)
+
 		fmt.Println("Kubernetes assets deleted successfully.")
 		os.Exit(0)
 	}
@@ -1086,8 +1255,6 @@ func main() {
 		panic("Fatal: Unable to write to s3 bucket.  Please check permissions and try again.")
 	}
 
-	// TODO: needs Internet Gateway
-
 	// ELB for master nodes
 	elbDNSName := getELBDNSName(elbSvc)
 	if elbDNSName == nil {
@@ -1114,8 +1281,9 @@ func main() {
 		ELBSecurityGroupID = createSecurityGroup(svc, "ELB", vpcID)
 		authorize = true
 	}
-	if authorize {
-		setupSecurityGroupsAuth(svc, minionSecurityGroupID, masterSecurityGroupID, ELBSecurityGroupID)
+	if authorize == true {
+		fmt.Println("authorizing security groups for cluster communication")
+		setupSecurityGroupsAuth(svc, masterSecurityGroupID, minionSecurityGroupID, ELBSecurityGroupID)
 	}
 
 	// Security Groups for kube.  Lookup for launch uses Tagged with KubernetesCluster=cluster-name
