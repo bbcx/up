@@ -1144,6 +1144,21 @@ func deleteSecGroup(svc *ec2.EC2, secGroupID *string) bool {
 	return true
 }
 
+func deleteIGW(svc *ec2.EC2) {
+	params := *ec2.DescribeInternetGatewaysInput{
+		Filters: []*ec2.Filter{
+			{
+				Name: aws.String("tag:KubernetesCluster"),
+				Values: []*string{
+					aws.String(viper.GetString("cluster-name")),
+				},
+			},
+		},
+	}
+
+	svc.DescribeInternetGateways(params)
+}
+
 func main() {
 	// Viper configuration engine
 	viper.SetConfigName("config")
@@ -1194,6 +1209,7 @@ func main() {
 		deleteSecGroup(svc, elbSecGroupID)
 
 		// IGW (tagged)
+		deleteIGW(svc)
 
 		// Route Table (tagged)
 
