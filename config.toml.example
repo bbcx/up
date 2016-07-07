@@ -5,25 +5,22 @@ region="us-west-2"
 ami="ami-1442ba74"
 
 # SSH key name
-ssh-key-name="newcarl"
+ssh-key-name="CHANGEME"
 
 # S3 is used for key distribution : prefix of "kubernetes-" for instances via IAM instance policy.
-s3-ca-storage-bucket="kubernetes-testing-cluster-storage"
-
-# ELB name to use for the master apiserver
-elb-name="kubernetes-testing-master0"
+s3-ca-storage-bucket="CHANGEME"
 
 # VPC
-vpc-cidr-block="172.40.0.0/16"
+vpc-cidr-block="172.31.0.0/16"
 
 # Subnets
 num-subnets=3
-subnet-0-cidr="172.40.0.0/24"
-subnet-1-cidr="172.40.1.0/24"
-subnet-2-cidr="172.40.2.0/24"
+subnet-0-cidr="172.31.0.0/24"
+subnet-1-cidr="172.31.1.0/24"
+subnet-2-cidr="172.31.2.0/24"
 
 # Tag lookup using Tag=KubernetesCluster=Value
-cluster-name="testing"
+cluster-name="CHANGEME"
 
 # The range kubernetes will use for the entire cluster.
 cluster-cidr="10.244.0.0/16"
@@ -35,7 +32,10 @@ service-cluster-ip-range="10.244.244.0/24"
 cluster-dns="10.244.244.10"
 
 # Certificate generation path where we manage the certificate authority.
-certificate-path="./k8s_certs"
+certificate-path="/full/path/to/up/k8s_certs"
+
+# Kube config user home
+kube-config-home="/path/to/home/.kube/config"
 
 # Master Cluster Size
 master-cluster-size="1"
