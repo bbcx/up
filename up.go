@@ -40,6 +40,13 @@ type sslConf struct {
 	ELBDNSName string
 }
 
+type userKubeConfig struct {
+	MasterURL         string
+	CertAuthorityPath string
+	ClientCertPath    string
+	ClientKeyPath     string
+}
+
 func ensureRouteTable(svc *ec2.EC2) (success bool) {
 
 	// Lookup existing resources from tag name
@@ -343,8 +350,8 @@ func createS3Bucket() {
 	if err != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
 		// Message from an error.
-		fmt.Println(err.Error())
-		fmt.Println("S3 bucket already exists.  Continuing.")
+		//fmt.Println(err.Error())
+		//fmt.Println("S3 bucket already exists.  Continuing.")
 		return
 	}
 }
@@ -366,6 +373,49 @@ func putObjS3(key string, content string) (success bool) {
 		return false
 	}
 	return true
+}
+
+func generateSkyDNSConfig(kubeConfigValues userKubeConfig) {
+	targetFileName := "kube-dns-" + viper.GetString("cluster-name") + ".yaml"
+	templateText, err := ioutil.ReadFile("templates/kube_dns.yaml.template")
+	tmpl, err := template.New("kubedns").Parse(string(templateText))
+	if err != nil {
+		panic(err)
+	}
+
+	f, err := os.Create(targetFileName)
+	if err != nil {
+		fmt.Println("create file: ", err)
+		panic("could not write file")
+	}
+
+	err = tmpl.Execute(f, kubeConfigValues)
+	if err != nil {
+		panic(err)
+	}
+	f.Close()
+	fmt.Println("skydns config written to " + targetFileName)
+
+}
+
+func generateUserLaptopKubeConfig(kubeConfigValues userKubeConfig) {
+	templateText, err := ioutil.ReadFile("templates/dot-kube-config.template")
+	tmpl, err := template.New("userkube").Parse(string(templateText))
+	if err != nil {
+		panic(err)
+	}
+
+	f, err := os.Create(viper.GetString("kube-config-home"))
+	if err != nil {
+		fmt.Println("create file: ", err)
+		panic("could not write file")
+	}
+
+	err = tmpl.Execute(f, kubeConfigValues)
+	if err != nil {
+		panic(err)
+	}
+	f.Close()
 }
 
 func generateSSL(fileTemplate string, sslSettings sslConf, generateCommand string, name string) (string, string, string) {
@@ -532,6 +582,36 @@ func createVPCNetworking(svc *ec2.EC2) *string {
 
 	fmt.Println("Created VPC: " + *vpcID)
 
+	paramsModVPC := &ec2.ModifyVpcAttributeInput{
+		VpcId: vpcID, // Required
+		EnableDnsSupport: &ec2.AttributeBooleanValue{
+			Value: aws.Bool(true),
+		},
+	}
+
+	_, pModErr := svc.ModifyVpcAttribute(paramsModVPC)
+
+	if pModErr != nil {
+		fmt.Println("error modifying VPC attributes for DNS support")
+		fmt.Println(pModErr)
+		os.Exit(1)
+	}
+
+	paramsModVPC2 := &ec2.ModifyVpcAttributeInput{
+		VpcId: vpcID, // Required
+		EnableDnsHostnames: &ec2.AttributeBooleanValue{
+			Value: aws.Bool(true),
+		},
+	}
+
+	_, pModErr2 := svc.ModifyVpcAttribute(paramsModVPC2)
+
+	if pModErr2 != nil {
+		fmt.Println("error modifying VPC attributes for DNS hostnames")
+		fmt.Println(pModErr2)
+		os.Exit(1)
+	}
+
 	rtParams := &ec2.DescribeRouteTablesInput{
 		Filters: []*ec2.Filter{
 			{
@@ -622,14 +702,13 @@ func createSubnets(svc *ec2.EC2, vpcID *string) {
 		fmt.Println(descAZErr.Error())
 		return
 	}
-	numAZs := int64(len(descAZResp.AvailabilityZones))
+	//numAZs := int64(len(descAZResp.AvailabilityZones))
 
 	// Create the subnets
 	times, _ := strconv.ParseInt(viper.GetString("num-subnets"), 10, 0)
 	var loop int64
 	for loop = 0; loop < times; loop++ {
-		useAZIndex := loop % numAZs
-		fmt.Printf("use az index: %d", useAZIndex)
+		//useAZIndex := loop % numAZs
 		myCidrBlock := viper.GetString("subnet-" + fmt.Sprintf("%d", loop) + "-cidr")
 		params := &ec2.CreateSubnetInput{
 			CidrBlock:        aws.String(myCidrBlock),
@@ -667,9 +746,6 @@ func createSubnets(svc *ec2.EC2, vpcID *string) {
 			return
 		}
 
-		// Pretty-print the response data.
-		fmt.Println(resp)
-
 		// Tag the subnets
 		_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
 			Resources: []*string{resp.Subnet.SubnetId},
@@ -696,14 +772,10 @@ func deleteVPC(svc *ec2.EC2) {
 		return
 	}
 
-	fmt.Printf("Tearing down K8S cluster for tag: %s, vpc_id: %s\n", viper.GetString("cluster-name"), *vpcID)
-	fmt.Println("Press 'Enter' to continue... CTRL-C to abort.")
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
-
 	params := &ec2.DeleteVpcInput{
 		VpcId: vpcID,
 	}
-	resp, err := svc.DeleteVpc(params)
+	_, err := svc.DeleteVpc(params)
 
 	if err != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
@@ -711,9 +783,6 @@ func deleteVPC(svc *ec2.EC2) {
 		fmt.Println(err.Error())
 		return
 	}
-
-	// Pretty-print the response data.
-	fmt.Println(resp)
 }
 
 func checkRole(roleName string) (arn *string) {
@@ -828,9 +897,6 @@ func createPolicy(policyTemplateFile string, shortname string) (arn *string) {
 		}
 	}
 
-	// Pretty-print the response data.
-	fmt.Println(resp)
-
 	return policyArn
 }
 
@@ -894,7 +960,7 @@ func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 		InstanceProfileName: aws.String(roleName), // Required
 		RoleName:            aws.String(roleName), // Required
 	}
-	resp4, err4 := svc.AddRoleToInstanceProfile(params4)
+	_, err4 := svc.AddRoleToInstanceProfile(params4)
 
 	if err4 != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
@@ -902,9 +968,6 @@ func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
-
-	// Pretty-print the response data.
-	fmt.Println(resp4)
 
 	return iArn
 }
@@ -1122,9 +1185,6 @@ func createELB(svc *ec2.EC2, elbsvc *elb.ELB, vpcID *string) (elbDNSName *string
 		return
 	}
 
-	// Pretty-print the response data.
-	fmt.Println(resp)
-
 	return resp.DNSName
 
 }
@@ -1144,7 +1204,7 @@ func deleteSecGroup(svc *ec2.EC2, secGroupID *string) bool {
 	return true
 }
 
-func deleteIGW(svc *ec2.EC2) (bool) {
+func deleteIGW(svc *ec2.EC2) bool {
 	params := &ec2.DescribeInternetGatewaysInput{
 		Filters: []*ec2.Filter{
 			{
@@ -1157,16 +1217,29 @@ func deleteIGW(svc *ec2.EC2) (bool) {
 	}
 
 	resp, err := svc.DescribeInternetGateways(params)
-	if err != nil {
+	if err != nil || len(resp.InternetGateways) == 0 {
 		fmt.Println("could not lookup IGW")
 		fmt.Println(err)
+		return false
+	}
+
+	paramsDetach := &ec2.DetachInternetGatewayInput{
+		InternetGatewayId: resp.InternetGateways[0].InternetGatewayId,
+		VpcId:             resp.InternetGateways[0].Attachments[0].VpcId,
+	}
+
+	_, errDetach := svc.DetachInternetGateway(paramsDetach)
+
+	if errDetach != nil {
+		fmt.Println("error detaching IGW from vpc")
+		fmt.Println(errDetach)
 		return false
 	}
 
 	paramsDelete := &ec2.DeleteInternetGatewayInput{
 		InternetGatewayId: resp.InternetGateways[0].InternetGatewayId,
 	}
-	
+
 	_, errDelete := svc.DeleteInternetGateway(paramsDelete)
 
 	if errDelete != nil {
@@ -1192,8 +1265,8 @@ func deleteRouteTable(svc *ec2.EC2) bool {
 
 	resp, err := svc.DescribeRouteTables(params)
 
-	if err != nil {
-		fmt.Println("error describing route tables")
+	if err != nil || len(resp.RouteTables) == 0 {
+		fmt.Println("error describing route tables or no route table found")
 		fmt.Println(err)
 		return false
 	}
@@ -1226,7 +1299,7 @@ func deleteDhcpOptionSet(svc *ec2.EC2) bool {
 
 	resp, err := svc.DescribeDhcpOptions(params)
 
-	if err != nil {
+	if err != nil || len(resp.DhcpOptions) == 0 {
 		fmt.Println("error describing dhcp option sets")
 		fmt.Println(err)
 		return false
@@ -1252,7 +1325,7 @@ func deleteSubnet(svc *ec2.EC2, subnetID *string) bool {
 		SubnetId: subnetID,
 	}
 
-	resp, err := svc.DeleteSubnet(params)
+	_, err := svc.DeleteSubnet(params)
 
 	if err != nil {
 		fmt.Println("error deleting subnet")
@@ -1293,9 +1366,8 @@ func deleteSubnets(svc *ec2.EC2) bool {
 	return allSuccess
 }
 
-
 func main() {
-	
+
 	viper.SetConfigName("config")
 	viper.AddConfigPath(".")
 	viper.SetEnvPrefix("BB")
@@ -1305,6 +1377,8 @@ func main() {
 	if err != nil {             // Handle errors reading the config file
 		panic(fmt.Errorf("Fatal error config file: %s \n", err))
 	}
+
+	viper.SetDefault("elb-name", "k8s-master-"+viper.GetString("cluster-name"))
 
 	// Flags
 	var action = flag.String("action", "", "Action can be: init, launch-minion")
@@ -1324,6 +1398,9 @@ func main() {
 
 	if *action == "delete" {
 		//teardown: TODO: IAM Policies, IAM Roles
+		fmt.Printf("Tearing down K8S cluster for tag: %s\n", viper.GetString("cluster-name"))
+		fmt.Println("Press 'Enter' to continue... CTRL-C to abort.")
+		bufio.NewReader(os.Stdin).ReadBytes('\n')
 
 		// start with instances
 		deleteInstances(svc)
@@ -1346,35 +1423,28 @@ func main() {
 		// IGW (tagged)
 		deleteIGW(svc)
 
-		// Route Table (tagged)
-		deleteRouteTable(svc)
-
 		// Dhcp Option set (tagged)
 		deleteDhcpOptionSet(svc)
 
 		// All clear for Subnet delete (tagged)
 		deleteSubnets(svc)
 
-		//teardown VPC
+		// teardown VPC (tagged)
 		deleteVPC(svc)
+
+		// Route Table (tagged)
+		deleteRouteTable(svc)
 
 		fmt.Println("Kubernetes assets deleted successfully.")
 		os.Exit(0)
 	}
-	// Things to create if not exists:
-	// VPC (this also creates a RouteTable)
-	// RouteTable
-	// Subnets
+
+	// Begin Create
+
 	vpcID := detectVPC(svc)
 	if vpcID == nil {
 		vpcID = createVPCNetworking(svc)
 	}
-
-	// Ensure RouteTable (sanity check pre-launch)
-	// TODO: no longer necessary?
-	//if ensureRouteTable(svc) != true {
-	//	panic("Fatal: could not lookup RouteTable for this cluster.")
-	//}
 
 	// IAM Roles for Master and Minion
 	masterArn := checkPolicy("master")
@@ -1398,8 +1468,6 @@ func main() {
 	if instanceProfileArnMinion == nil {
 		instanceProfileArnMinion = createRole(minionArn, minionRoleName)
 	}
-
-	fmt.Printf("instance profile arns: %s, %s\n", *instanceProfileArnMaster, *instanceProfileArnMinion)
 
 	// S3 Bucket for certs
 	createS3Bucket()
@@ -1488,6 +1556,18 @@ func main() {
 			// Associate Master with ELB
 			assocMasterWithELB(elbSvc, masterInstanceID)
 		}
+
+		// Drop in kube config for laptop user
+		kubeConfigValues := userKubeConfig{
+			"https://" + *elbDNSName,
+			viper.GetString("certificate-path") + "/ca.pem",
+			viper.GetString("certificate-path") + "/admin.pem",
+			viper.GetString("certificate-path") + "/admin-key.pem",
+		}
+
+		generateUserLaptopKubeConfig(kubeConfigValues)
+		fmt.Println("kubectl config written to: " + viper.GetString("kube-config-home"))
+		generateSkyDNSConfig(kubeConfigValues)
 	}
 
 	if *action == "launch-minion" {

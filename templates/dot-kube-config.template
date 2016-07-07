@@ -1,0 +1,19 @@
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: {{.CertAuthorityPath}}
+    server: {{.MasterURL}}
+  name: aws_kubernetes
+contexts:
+- context:
+    cluster: aws_kubernetes
+    user: aws_kubernetes
+  name: aws_kubernetes
+current-context: aws_kubernetes
+kind: Config
+preferences: {}
+users:
+- name: aws_kubernetes
+  user:
+    client-certificate: {{.ClientCertPath}}
+    client-key: {{.ClientKeyPath}}
