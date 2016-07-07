@@ -230,7 +230,7 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 			Name: aws.String("kubernetes-master-" + viper.GetString("cluster-name")),
 		},
 		InstanceInitiatedShutdownBehavior: aws.String("terminate"),
-		InstanceType:                      aws.String("t2.nano"),
+		InstanceType:                      aws.String("t2.micro"),
 		KeyName:                           aws.String(viper.GetString("ssh-key-name")),
 		SecurityGroupIds: []*string{
 			masterSecurityGroupID,
@@ -1024,6 +1024,30 @@ func setupSecurityGroupsAuth(svc *ec2.EC2, masterSecGroupID *string, minionSecGr
 		fmt.Println("Could not authorize security group for Minion to Master")
 		os.Exit(1)
 	} */
+
+	// Setup Minion to Minion
+	params5 := &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: minionSecGroupID,
+		IpPermissions: []*ec2.IpPermission{
+			{ // Required
+				FromPort:   aws.Int64(0),
+				IpProtocol: aws.String("TCP"),
+				ToPort:     aws.Int64(65535),
+				UserIdGroupPairs: []*ec2.UserIdGroupPair{
+					{ // Required
+						GroupId: minionSecGroupID,
+					},
+				},
+			},
+		},
+	}
+	_, err5 := svc.AuthorizeSecurityGroupIngress(params5)
+
+	if err5 != nil {
+		fmt.Println(err5.Error())
+		fmt.Println("Could not authorize security group for Minion to Minion")
+		os.Exit(1)
+	}
 
 	// Setup Master to Minion
 	params2 := &ec2.AuthorizeSecurityGroupIngressInput{

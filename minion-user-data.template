@@ -27,8 +27,8 @@ write_files:
     owner: root
     permissions: 0755
     content: |
-      KUBELET_ADDRESS="--address=127.0.0.1"
-      KUBELET_HOSTNAME="--hostname-override=127.0.0.1"
+      KUBELET_ADDRESS="--address=$private_ipv4"
+      KUBELET_HOSTNAME="--hostname-override=$private_ipv4"
       KUBELET_API_SERVER="--api-servers=https://{{.ELBDNSName}}"
       KUBELET_ARGS="--cloud-provider=aws --kubeconfig=/var/lib/kubelet/kubeconfig --non-masquerade-cidr={{.ClusterCIDR}} --cluster-dns={{.ClusterDNS}} --configure-cbr0=true --cluster-domain=cluster.local --tls-cert-file=/etc/kubernetes/ssl/minion.pem --tls-private-key-file=/etc/kubernetes/ssl/minion-key.pem"
   - path: /etc/kubernetes/proxy
