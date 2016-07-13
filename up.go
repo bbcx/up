@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"flag"
@@ -227,7 +226,7 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 		//EbsOptimized:          aws.Bool(true),
 		IamInstanceProfile: &ec2.IamInstanceProfileSpecification{
 			//Arn: aws.String(instanceProfileArn),
-			Name: aws.String("kubernetes-master-" + viper.GetString("cluster-name")),
+			Name: aws.String("k8s-master" + viper.GetString("cluster-name")),
 		},
 		InstanceInitiatedShutdownBehavior: aws.String("terminate"),
 		InstanceType:                      aws.String("t2.micro"),
@@ -326,7 +325,7 @@ func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 		//EbsOptimized:          aws.Bool(true),
 		IamInstanceProfile: &ec2.IamInstanceProfileSpecification{
 			//Arn: aws.String(instanceProfileArn),
-			Name: aws.String("kubernetes-minion-" + viper.GetString("cluster-name")),
+			Name: aws.String("k8s-minion" + viper.GetString("cluster-name")),
 		},
 		InstanceInitiatedShutdownBehavior: aws.String("terminate"),
 		InstanceType:                      aws.String("t2.micro"),
@@ -577,7 +576,6 @@ func detectVPC(svc *ec2.EC2) (vpcID *string) {
 		return nil
 	}
 
-	// Pretty-print the response data.
 	if len(resp.Vpcs) == 0 {
 		return nil
 	}
@@ -751,7 +749,7 @@ func createRouteForIGW(svc *ec2.EC2, IGWID *string, routeTableID *string) {
 		RouteTableId:         routeTableID,            // Required
 		GatewayId:            IGWID,
 	}
-	resp, err := svc.CreateRoute(params)
+	_, err := svc.CreateRoute(params)
 
 	if err != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
@@ -761,9 +759,6 @@ func createRouteForIGW(svc *ec2.EC2, IGWID *string, routeTableID *string) {
 		os.Exit(1)
 		return
 	}
-
-	// Pretty-print the response data.
-	fmt.Println(resp)
 }
 
 func createSubnets(svc *ec2.EC2, vpcID *string) {
@@ -950,13 +945,11 @@ func createPolicy(policyTemplateFile string, shortname string) (arn *string) {
 
 	params := &iam.CreatePolicyInput{
 		PolicyDocument: aws.String(masterTemplateText),
-		PolicyName:     aws.String("kubernetes-" + shortname + "-" + viper.GetString("cluster-name")),
+		PolicyName:     aws.String("k8s-" + shortname + "-" + viper.GetString("cluster-name")),
 		Description:    aws.String("Kubernetes " + shortname + " Instance Policy" + viper.GetString("cluster-name")),
 		//Path:           aws.String("/"),
 	}
 	resp, err := svc.CreatePolicy(params)
-
-	policyArn := resp.Policy.Arn
 
 	if err != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
@@ -966,13 +959,14 @@ func createPolicy(policyTemplateFile string, shortname string) (arn *string) {
 			fmt.Println("Policy exists, continue.")
 			// TODO policyArn =
 			// TODO: return policy ARN?
+			return nil
 		} else {
 			fmt.Println(err.Error())
 			os.Exit(1)
 		}
 	}
 
-	return policyArn
+	return resp.Policy.Arn
 }
 
 func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
@@ -993,7 +987,8 @@ func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
-
+	// TODO: use a retry to fix this race condition.
+	//time.Sleep(20)
 	// Pretty-print the response data.
 	fmt.Println(resp)
 
@@ -1501,6 +1496,27 @@ func deleteKubeELBs(svc *ec2.EC2, elbSvc *elb.ELB) bool {
 	return true
 }
 
+func waitForKubeOperational() {
+	done := false
+	for done == false {
+		out, errExec := exec.Command("kubectl", "get", "nodes").CombinedOutput()
+		if errExec != nil {
+
+			fmt.Println(errExec)
+			fmt.Println(string(out))
+			time.Sleep(time.Second * 5)
+		} else {
+			done = true
+		}
+	}
+}
+
+func loadDNSAddon() {
+	targetFileName := "kube-dns-" + viper.GetString("cluster-name") + ".yaml"
+	exec.Command("kubectl", "create", "namespace", "kube-system").CombinedOutput()
+	exec.Command("kubectl", "create", "-f", targetFileName).CombinedOutput()
+}
+
 func main() {
 
 	viper.SetConfigName("config")
@@ -1533,9 +1549,9 @@ func main() {
 
 	if *action == "delete" {
 		//teardown: TODO: IAM Policies, IAM Roles
-		fmt.Printf("Tearing down K8S cluster for tag: %s\n", viper.GetString("cluster-name"))
+		/* fmt.Printf("Tearing down K8S cluster for tag: %s\n", viper.GetString("cluster-name"))
 		fmt.Println("Press 'Enter' to continue... CTRL-C to abort.")
-		bufio.NewReader(os.Stdin).ReadBytes('\n')
+		bufio.NewReader(os.Stdin).ReadBytes('\n') */
 
 		// start with instances
 		deleteInstances(svc)
@@ -1594,13 +1610,13 @@ func main() {
 		minionArn = createPolicy("templates/kube-minion-iam-policy.json", "minion")
 	}
 
-	masterRoleName := "kubernetes-master-" + viper.GetString("cluster-name")
+	masterRoleName := "k8s-master" + viper.GetString("cluster-name")
 	instanceProfileArnMaster := checkRole(masterRoleName)
 	if instanceProfileArnMaster == nil {
 		instanceProfileArnMaster = createRole(masterArn, masterRoleName)
 	}
 
-	minionRoleName := "kubernetes-minion-" + viper.GetString("cluster-name")
+	minionRoleName := "k8s-minion" + viper.GetString("cluster-name")
 	instanceProfileArnMinion := checkRole(minionRoleName)
 	if instanceProfileArnMinion == nil {
 		instanceProfileArnMinion = createRole(minionArn, minionRoleName)
@@ -1664,6 +1680,9 @@ func main() {
 	}
 
 	if *action == "init" {
+		//TODO : allow aws to settle, make sure the iam profile name exists..
+		fmt.Println("waiting 60 seconds for IAM to sync with EC2")
+		time.Sleep(time.Second * 60)
 		masterUserData := generateUserDataFromTemplate("master-user-data.template", templateValuesMaster)
 		masterUserDataEncoded := base64.StdEncoding.EncodeToString([]byte(masterUserData))
 
@@ -1707,7 +1726,7 @@ func main() {
 		generateSkyDNSConfig(kubeConfigValues)
 	}
 
-	if *action == "launch-minion" {
+	if *action == "launch-minion" || *action == "init" {
 		// Generate User-data for minion.
 		minionUserData := generateUserDataFromTemplate("minion-user-data.template", templateValuesMaster)
 		minionUserDataEncoded := base64.StdEncoding.EncodeToString([]byte(minionUserData))
@@ -1736,6 +1755,9 @@ func main() {
 			putObjS3(*minionInstanceID+"-"+"minion-key.pem", minionKey)
 			putObjS3(*minionInstanceID+"-"+"ca.pem", minionCa)
 		}
+
+		waitForKubeOperational()
+		loadDNSAddon()
 	}
 
 	// Success
