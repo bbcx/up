@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -82,7 +83,6 @@ func ensureRouteTable(svc *ec2.EC2) (success bool) {
 }
 
 func getSecurityGroup(svc *ec2.EC2, kindOf string) *string {
-	tagLookup := "Kubernetes" + kindOf
 	params := &ec2.DescribeSecurityGroupsInput{
 		Filters: []*ec2.Filter{
 			{ // Required
@@ -92,9 +92,9 @@ func getSecurityGroup(svc *ec2.EC2, kindOf string) *string {
 				},
 			},
 			{ // Required
-				Name: aws.String("tag-key"),
+				Name: aws.String("tag:for"),
 				Values: []*string{
-					aws.String(tagLookup),
+					aws.String(kindOf),
 				},
 			},
 		},
@@ -253,12 +253,31 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 
 // Add KubernetesCluster=<clustername> tag to a resource
 func tagIt(svc *ec2.EC2, ID *string) bool {
+	time.Sleep(2)
 	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
 		Resources: []*string{ID},
 		Tags: []*ec2.Tag{
 			{
 				Key:   aws.String("KubernetesCluster"),
 				Value: aws.String(viper.GetString("cluster-name")),
+			},
+		},
+	})
+	if errtag != nil {
+		fmt.Println("Could not create tags for ", *ID, errtag)
+		return false
+	}
+	return true
+}
+
+func tagFor(svc *ec2.EC2, ID *string, tagFor string) bool {
+	time.Sleep(2)
+	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
+		Resources: []*string{ID},
+		Tags: []*ec2.Tag{
+			{
+				Key:   aws.String("for"),
+				Value: aws.String(tagFor),
 			},
 		},
 	})
@@ -511,6 +530,10 @@ func deleteInstances(svc *ec2.EC2) bool {
 		fmt.Println(*resp.Reservations[i].Instances[0].InstanceId)
 		terminateInstance(svc, resp.Reservations[i].Instances[0].InstanceId)
 	}
+	for k := 0; k < len(resp.Reservations); k++ {
+		fmt.Println(*resp.Reservations[k].Instances[0].InstanceId)
+		waitInstanceTerminated(svc, resp.Reservations[k].Instances[0].InstanceId)
+	}
 	return true
 }
 
@@ -563,6 +586,44 @@ func detectVPC(svc *ec2.EC2) (vpcID *string) {
 	return resp.Vpcs[0].VpcId
 }
 
+func createDhcpOptionsSet(svc *ec2.EC2) *string {
+	useHostNameSuffix := ""
+	if viper.GetString("region") == "us-east-1" {
+		useHostNameSuffix = "ec2.internal"
+	} else {
+		useHostNameSuffix = ".compute.internal"
+	}
+	params := &ec2.CreateDhcpOptionsInput{
+		DhcpConfigurations: []*ec2.NewDhcpConfiguration{
+			{ // Required
+				Key: aws.String("domain-name-servers"),
+				Values: []*string{
+					aws.String("AmazonProvidedDNS"), // Required
+				},
+			},
+			{ // Required
+				Key: aws.String("domain-name"),
+				Values: []*string{
+					aws.String(viper.GetString("region") + useHostNameSuffix), // Required
+				},
+			},
+			//more
+		},
+	}
+
+	resp, err := svc.CreateDhcpOptions(params)
+
+	if err != nil {
+		fmt.Println("error creating DHCP Options Set")
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	tagIt(svc, resp.DhcpOptions.DhcpOptionsId)
+
+	return resp.DhcpOptions.DhcpOptionsId
+}
+
 func createVPCNetworking(svc *ec2.EC2) *string {
 	params := &ec2.CreateVpcInput{
 		CidrBlock: aws.String(viper.GetString("vpc-cidr-block")), // Required
@@ -609,6 +670,20 @@ func createVPCNetworking(svc *ec2.EC2) *string {
 	if pModErr2 != nil {
 		fmt.Println("error modifying VPC attributes for DNS hostnames")
 		fmt.Println(pModErr2)
+		os.Exit(1)
+	}
+
+	dhcpOptionsSetID := createDhcpOptionsSet(svc)
+	paramsModVPC3 := &ec2.AssociateDhcpOptionsInput{
+		VpcId:         vpcID,            // Required
+		DhcpOptionsId: dhcpOptionsSetID, // Required
+	}
+
+	_, pModErr3 := svc.AssociateDhcpOptions(paramsModVPC3)
+
+	if pModErr3 != nil {
+		fmt.Println("error associating dhcp options set with VPC")
+		fmt.Println(pModErr3)
 		os.Exit(1)
 	}
 
@@ -840,7 +915,7 @@ func getELBDNSName(elbsvc *elb.ELB) (elbDNSName *string) {
 	resp, err := elbsvc.DescribeLoadBalancers(params)
 
 	if err != nil {
-		//somethingwong
+		//somethingwrong
 		return nil
 	}
 
@@ -854,7 +929,7 @@ func deleteMasterELB(elbsvc *elb.ELB) bool {
 
 	_, err := elbsvc.DeleteLoadBalancer(params)
 	if err != nil {
-		fmt.Println("Error deleteing load balancer.")
+		fmt.Println("Error deleting load balancer.")
 		fmt.Println(err)
 	}
 
@@ -926,7 +1001,7 @@ func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 		PolicyArn: policyArn, // Required
 		RoleName:  aws.String(roleName),
 	}
-	resp2, err2 := svc.AttachRolePolicy(params2)
+	_, err2 := svc.AttachRolePolicy(params2)
 
 	if err2 != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
@@ -934,9 +1009,6 @@ func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 		fmt.Println(err2.Error())
 		os.Exit(1)
 	}
-
-	// Pretty-print the response data.
-	fmt.Println(resp2)
 
 	params3 := &iam.CreateInstanceProfileInput{
 		InstanceProfileName: aws.String(roleName), // Required
@@ -952,9 +1024,6 @@ func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 	}
 
 	iArn := resp3.InstanceProfile.Arn
-
-	// Pretty-print the response data.
-	fmt.Println(resp3)
 
 	params4 := &iam.AddRoleToInstanceProfileInput{
 		InstanceProfileName: aws.String(roleName), // Required
@@ -1046,6 +1115,29 @@ func setupSecurityGroupsAuth(svc *ec2.EC2, masterSecGroupID *string, minionSecGr
 	if err5 != nil {
 		fmt.Println(err5.Error())
 		fmt.Println("Could not authorize security group for Minion to Minion")
+		os.Exit(1)
+	}
+
+	params6 := &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: minionSecGroupID,
+		IpPermissions: []*ec2.IpPermission{
+			{ // Required
+				FromPort:   aws.Int64(0),
+				IpProtocol: aws.String("UDP"),
+				ToPort:     aws.Int64(65535),
+				UserIdGroupPairs: []*ec2.UserIdGroupPair{
+					{ // Required
+						GroupId: minionSecGroupID,
+					},
+				},
+			},
+		},
+	}
+	_, err6 := svc.AuthorizeSecurityGroupIngress(params6)
+
+	if err6 != nil {
+		fmt.Println(err6.Error())
+		fmt.Println("Could not authorize security group for Minion to Minion UDP")
 		os.Exit(1)
 	}
 
@@ -1143,23 +1235,8 @@ func createSecurityGroup(svc *ec2.EC2, kindOf string, vpcID *string) (securityGr
 	securityGroupID = resp.GroupId
 
 	// Tag with the necessary tags
-	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
-		Resources: []*string{securityGroupID},
-		Tags: []*ec2.Tag{
-			{
-				Key:   aws.String("KubernetesCluster"),
-				Value: aws.String(viper.GetString("cluster-name")),
-			},
-			{
-				Key:   aws.String("Kubernetes" + kindOf),
-				Value: aws.String(""),
-			},
-		},
-	})
-	if errtag != nil {
-		log.Println("Could not create tags for security group", *vpcID, errtag)
-		os.Exit(1)
-	}
+	tagIt(svc, securityGroupID)
+	tagFor(svc, securityGroupID, kindOf)
 
 	return securityGroupID
 }
@@ -1171,7 +1248,9 @@ func createELB(svc *ec2.EC2, elbsvc *elb.ELB, vpcID *string) (elbDNSName *string
 
 	if securityGroupID == nil {
 		fmt.Printf("Creating security group for Kubernetes Master ELB.")
-		securityGroupID = createSecurityGroup(svc, "ELB", vpcID)
+		fmt.Println("could not find security group for kubernetes master ELB.")
+		os.Exit(1)
+		//securityGroupID = createSecurityGroup(svc, "ELB", vpcID)
 	}
 
 	// Create ELB
@@ -1336,7 +1415,7 @@ func deleteDhcpOptionSet(svc *ec2.EC2) bool {
 	_, respErr := svc.DeleteDhcpOptions(paramsDelete)
 
 	if respErr != nil {
-		fmt.Println("error deleteing dhcp options set")
+		fmt.Println("error deleting dhcp options set")
 		fmt.Println(respErr)
 		return false
 	}
@@ -1390,6 +1469,38 @@ func deleteSubnets(svc *ec2.EC2) bool {
 	return allSuccess
 }
 
+func waitInstanceTerminated(svc *ec2.EC2, instanceID *string) bool {
+	// Use a waiter function to wait until the instances are stopped.
+	describeInstancesInput := &ec2.DescribeInstancesInput{
+		InstanceIds: []*string{instanceID},
+	}
+	if err := svc.WaitUntilInstanceTerminated(describeInstancesInput); err !=
+		nil {
+		fmt.Println(err)
+		return (false)
+	}
+	fmt.Println("Instance is terminated.")
+	return true
+}
+
+func deleteKubeELBs(svc *ec2.EC2, elbSvc *elb.ELB) bool {
+	/*paramsDescribe := &ec2.DescribeTagsInput{
+		Filters: []*ec2.Filter{
+			{
+				Name: aws.String("tag:KubernetesCluster"),
+				Values: []*string{
+					aws.String(viper.GetString("cluster-name")),
+				},
+			},
+		},
+	}
+
+	respTags, errTags := svc.DescribeTags(paramsDescribe)
+
+	respTags.Tags[0].ResourceType */
+	return true
+}
+
 func main() {
 
 	viper.SetConfigName("config")
@@ -1433,6 +1544,8 @@ func main() {
 		// TODO: teardown ELBs that were created by K8S controller also (tags look slightly wrong on these (missing cluster-name))
 		deleteMasterELB(elbSvc)
 
+		deleteKubeELBs(svc, elbSvc)
+
 		// ToDO: wait for instances and stuff to die off before deleting or they can't be deleted.
 		// Security Groups
 		masterSecGroupID := getSecurityGroup(svc, "Master")
@@ -1447,7 +1560,7 @@ func main() {
 		// IGW (tagged)
 		deleteIGW(svc)
 
-		// Dhcp Option set (tagged)
+		// Dhcp Option set (tagged) VPCs can use the same options set.
 		deleteDhcpOptionSet(svc)
 
 		// All clear for Subnet delete (tagged)
@@ -1459,7 +1572,7 @@ func main() {
 		// Route Table (tagged)
 		deleteRouteTable(svc)
 
-		fmt.Println("Kubernetes assets deleted successfully.")
+		fmt.Println("Kubernetes deletion sweep complete.")
 		os.Exit(0)
 	}
 
@@ -1501,13 +1614,6 @@ func main() {
 		panic("Fatal: Unable to write to s3 bucket.  Please check permissions and try again.")
 	}
 
-	// ELB for master nodes
-	elbDNSName := getELBDNSName(elbSvc)
-	if elbDNSName == nil {
-		fmt.Printf("Creating ELB for %s", viper.GetString("elb-name"))
-		elbDNSName = createELB(svc, elbSvc, vpcID)
-	}
-
 	// Ensure Security groups are created and authorized
 	authorize := false
 	masterSecurityGroupID := getSecurityGroup(svc, "Master")
@@ -1530,6 +1636,13 @@ func main() {
 	if authorize == true {
 		fmt.Println("authorizing security groups for cluster communication")
 		setupSecurityGroupsAuth(svc, masterSecurityGroupID, minionSecurityGroupID, ELBSecurityGroupID)
+	}
+
+	// ELB for master nodes
+	elbDNSName := getELBDNSName(elbSvc)
+	if elbDNSName == nil {
+		fmt.Printf("Creating ELB for %s", viper.GetString("elb-name"))
+		elbDNSName = createELB(svc, elbSvc, vpcID)
 	}
 
 	// Security Groups for kube.  Lookup for launch uses Tagged with KubernetesCluster=cluster-name
