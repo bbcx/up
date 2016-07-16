@@ -5,7 +5,7 @@
       "Effect": "Allow",
       "Action": "s3:*",
       "Resource": [
-        "arn:aws:s3:::kubernetes-*"
+        "arn:aws:s3:::{{.S3Bucket}}/*"
       ]
     },
     {

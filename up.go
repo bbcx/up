@@ -47,6 +47,10 @@ type userKubeConfig struct {
 	ClientKeyPath     string
 }
 
+type policyConf struct {
+	S3Bucket string
+}
+
 func ensureRouteTable(svc *ec2.EC2) (success bool) {
 
 	// Lookup existing resources from tag name
@@ -172,6 +176,20 @@ func getEtcdDiscoveryService(size string) string {
 
 	s := buf.String()
 	return s
+}
+
+func generatePolicyFromTemplate(templateFileName string, templateValues policyConf) string {
+	templateText, err := ioutil.ReadFile(templateFileName)
+	tmpl, err := template.New("policyConf").Parse(string(templateText))
+	if err != nil {
+		panic(err)
+	}
+	var dataBytesBuffer bytes.Buffer
+	err = tmpl.Execute(&dataBytesBuffer, templateValues)
+	if err != nil {
+		panic(err)
+	}
+	return dataBytesBuffer.String()
 }
 
 // Render user-data to a string using the specified template
@@ -456,15 +474,35 @@ func generateSSL(fileTemplate string, sslSettings sslConf, generateCommand strin
 	}
 	f.Close()
 
-	// generate master key with elb's name
 	parentDir, _ := os.Getwd()
 
 	os.Chdir(viper.GetString("certificate-path"))
 
+	// generate the ca
+	if _, err := os.Stat("ca.pem"); os.IsNotExist(err) {
+		outCA, errExecCA := exec.Command("./generate_ca.sh").CombinedOutput()
+		if errExecCA != nil {
+			fmt.Println(errExecCA)
+			fmt.Println(string(outCA))
+			panic("Fatal: error occured while running ./generate_ca.sh")
+		}
+	}
+
+	// generate admin keypair
+	if _, errAdmin := os.Stat("admin.pem"); os.IsNotExist(errAdmin) {
+		outAdmin, errExecAdmin := exec.Command("./generate_admin_keypair.sh").CombinedOutput()
+		if errExecAdmin != nil {
+			fmt.Println(errExecAdmin)
+			fmt.Println(string(outAdmin))
+			panic("Fatal: error occured while running ./generate_admin_keypair.sh")
+		}
+	}
+
+	// generate master key with elb's name
 	out, errExec := exec.Command(generateCommand).CombinedOutput()
 	if errExec != nil {
 		fmt.Println(errExec)
-		fmt.Println(out)
+		fmt.Println(string(out))
 		panic("Fatal: error occured while running" + generateCommand)
 	}
 
@@ -878,7 +916,7 @@ func checkPolicy(shortname string) (arn *string) {
 	svc := iam.New(session.New())
 
 	done := false
-	lookingForName := "kubernetes-" + shortname + "-" + viper.GetString("cluster-name")
+	lookingForName := "k8s-" + shortname + "-" + viper.GetString("cluster-name")
 
 	params := &iam.ListPoliciesInput{
 		//MaxItems: aws.Int64(5),
@@ -932,14 +970,10 @@ func deleteMasterELB(elbsvc *elb.ELB) bool {
 }
 
 func createPolicy(policyTemplateFile string, shortname string) (arn *string) {
-	masterTemplateTextBuf, err := ioutil.ReadFile(policyTemplateFile)
-
-	if err != nil {
-		fmt.Println("Fatal error: could not read policy templates.")
-		os.Exit(1)
+	templateValues := policyConf{
+		viper.GetString("s3-ca-storage-bucket"),
 	}
-
-	masterTemplateText := string(masterTemplateTextBuf)
+	masterTemplateText := generatePolicyFromTemplate(policyTemplateFile, templateValues)
 
 	svc := iam.New(session.New())
 
@@ -979,18 +1013,14 @@ func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 		RoleName:                 aws.String(roleName),
 		//Path:                     aws.String("pathType"),
 	}
-	resp, err := svc.CreateRole(params)
+	_, errRole := svc.CreateRole(params)
 
-	if err != nil {
+	if errRole != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
 		// Message from an error.
-		fmt.Println(err.Error())
+		fmt.Println(errRole.Error())
 		os.Exit(1)
 	}
-	// TODO: use a retry to fix this race condition.
-	//time.Sleep(20)
-	// Pretty-print the response data.
-	fmt.Println(resp)
 
 	params2 := &iam.AttachRolePolicyInput{
 		PolicyArn: policyArn, // Required
@@ -1283,6 +1313,24 @@ func createELB(svc *ec2.EC2, elbsvc *elb.ELB, vpcID *string) (elbDNSName *string
 		return
 	}
 
+	// Configure Health Check
+	paramsHC := &elb.ConfigureHealthCheckInput{
+		HealthCheck: &elb.HealthCheck{
+			HealthyThreshold:   aws.Int64(2),
+			Interval:           aws.Int64(5),
+			Target:             aws.String("TCP:6443"),
+			Timeout:            aws.Int64(3),
+			UnhealthyThreshold: aws.Int64(2),
+		},
+	}
+
+	_, errHC := elbsvc.ConfigureHealthCheck(paramsHC)
+
+	if errHC != nil {
+		fmt.Println("Error configuring health check for Master ELB.  Continuing")
+		fmt.Println(errHC)
+	}
+
 	return resp.DNSName
 
 }
@@ -1517,8 +1565,136 @@ func loadDNSAddon() {
 	exec.Command("kubectl", "create", "-f", targetFileName).CombinedOutput()
 }
 
-func main() {
+func deletePoliciesRoles() {
+	iamSvc := iam.New(session.New())
 
+	// First detach the role from all the Instance Policies
+	listInstanceProfilesForMaster := &iam.ListInstanceProfilesForRoleInput{
+		RoleName: aws.String("k8s-master" + viper.GetString("cluster-name")),
+	}
+
+	listInstanceProfilesForMinion := &iam.ListInstanceProfilesForRoleInput{
+		RoleName: aws.String("k8s-minion" + viper.GetString("cluster-name")),
+	}
+
+	respMasterProfile, _ := iamSvc.ListInstanceProfilesForRole(listInstanceProfilesForMaster)
+	respMinionProfile, _ := iamSvc.ListInstanceProfilesForRole(listInstanceProfilesForMinion)
+
+	for i := 0; i < len(respMasterProfile.InstanceProfiles); i++ {
+		detachInstanceProfileMaster := &iam.RemoveRoleFromInstanceProfileInput{
+			InstanceProfileName: respMasterProfile.InstanceProfiles[i].InstanceProfileName,
+			RoleName:            aws.String("k8s-master" + viper.GetString("cluster-name")),
+		}
+		_, errRemoveMaster := iamSvc.RemoveRoleFromInstanceProfile(detachInstanceProfileMaster)
+		detachInstanceProfileMinion := &iam.RemoveRoleFromInstanceProfileInput{
+			InstanceProfileName: respMinionProfile.InstanceProfiles[i].InstanceProfileName,
+			RoleName:            aws.String("k8s-minion" + viper.GetString("cluster-name")),
+		}
+		_, errRemoveMinion := iamSvc.RemoveRoleFromInstanceProfile(detachInstanceProfileMinion)
+
+		if errRemoveMaster != nil {
+			fmt.Println("Error removing role from Master instance profile")
+			fmt.Println(errRemoveMaster)
+		}
+		if errRemoveMinion != nil {
+			fmt.Println("Error removing role from Minion instance profile")
+			fmt.Println(errRemoveMinion)
+		}
+
+	}
+
+	// Detach all policies from roles
+
+	delRolePolicyMasterInput := &iam.DetachRolePolicyInput{
+		PolicyArn: checkPolicy("master"),
+		RoleName:  aws.String("k8s-master" + viper.GetString("cluster-name")),
+	}
+
+	delRolePolicyMinionInput := &iam.DetachRolePolicyInput{
+		PolicyArn: checkPolicy("minion"),
+		RoleName:  aws.String("k8s-minion" + viper.GetString("cluster-name")),
+	}
+
+	_, errDeleteRolePolicyMaster := iamSvc.DetachRolePolicy(delRolePolicyMasterInput)
+	_, errDeleteRolePolicyMinion := iamSvc.DetachRolePolicy(delRolePolicyMinionInput)
+
+	if errDeleteRolePolicyMaster != nil {
+		fmt.Println("Error detaching policy from Master role.")
+		fmt.Println(errDeleteRolePolicyMaster)
+	}
+	if errDeleteRolePolicyMinion != nil {
+		fmt.Println("Error detaching policy from Minion role.")
+		fmt.Println(errDeleteRolePolicyMinion)
+	}
+
+	// Delete Roles
+	delRoleMasterInput := &iam.DeleteRoleInput{
+		RoleName: aws.String("k8s-master" + viper.GetString("cluster-name")),
+	}
+	delRoleMinionInput := &iam.DeleteRoleInput{
+		RoleName: aws.String("k8s-minion" + viper.GetString("cluster-name")),
+	}
+
+	_, errMaster := iamSvc.DeleteRole(delRoleMasterInput)
+	_, errMinion := iamSvc.DeleteRole(delRoleMinionInput)
+
+	if errMaster != nil {
+		fmt.Println("Error during deletion of Master Role:")
+		fmt.Println(errMaster)
+	}
+	if errMinion != nil {
+		fmt.Println("Error during deletion of Minion Role:")
+		fmt.Println(errMinion)
+	}
+
+	// Delete Policies
+	delPolicyMasterInput := &iam.DeletePolicyInput{
+		PolicyArn: checkPolicy("master"),
+	}
+
+	_, delPolicyMasterErr := iamSvc.DeletePolicy(delPolicyMasterInput)
+
+	if delPolicyMasterErr != nil {
+		fmt.Println("Error deleting policy for master.")
+		fmt.Println(delPolicyMasterErr)
+	}
+
+	delPolicyMinionInput := &iam.DeletePolicyInput{
+		PolicyArn: checkPolicy("minion"),
+	}
+
+	_, delPolicyMinionErr := iamSvc.DeletePolicy(delPolicyMinionInput)
+
+	if delPolicyMinionErr != nil {
+		fmt.Println("Error deleting policy for minion.")
+		fmt.Println(delPolicyMinionErr)
+	}
+
+	// Delete Instance Profiles
+	delInstProfileMaster := &iam.DeleteInstanceProfileInput{
+		InstanceProfileName: aws.String("k8s-master" + viper.GetString("cluster-name")),
+	}
+
+	_, delInstProfileMasterErr := iamSvc.DeleteInstanceProfile(delInstProfileMaster)
+
+	if delInstProfileMasterErr != nil {
+		fmt.Println("Error deleting instance profile for master.")
+		fmt.Println(delInstProfileMasterErr)
+	}
+
+	delInstProfileMinion := &iam.DeleteInstanceProfileInput{
+		InstanceProfileName: aws.String("k8s-minion" + viper.GetString("cluster-name")),
+	}
+
+	_, delInstProfileMinionErr := iamSvc.DeleteInstanceProfile(delInstProfileMinion)
+
+	if delInstProfileMinionErr != nil {
+		fmt.Println("Error deleting instance profile for minion.")
+		fmt.Println(delInstProfileMinionErr)
+	}
+}
+
+func main() {
 	viper.SetConfigName("config")
 	viper.AddConfigPath(".")
 	viper.SetEnvPrefix("BB")
@@ -1562,6 +1738,8 @@ func main() {
 
 		deleteKubeELBs(svc, elbSvc)
 
+		deletePoliciesRoles()
+
 		// ToDO: wait for instances and stuff to die off before deleting or they can't be deleted.
 		// Security Groups
 		masterSecGroupID := getSecurityGroup(svc, "Master")
@@ -1599,27 +1777,37 @@ func main() {
 		vpcID = createVPCNetworking(svc)
 	}
 
+	waitForPolicy := false
 	// IAM Roles for Master and Minion
 	masterArn := checkPolicy("master")
 	if masterArn == nil {
 		masterArn = createPolicy("templates/kube-master-iam-policy.json", "master")
+		waitForPolicy = true
 	}
 
 	minionArn := checkPolicy("minion")
 	if minionArn == nil {
 		minionArn = createPolicy("templates/kube-minion-iam-policy.json", "minion")
+		waitForPolicy = true
 	}
 
 	masterRoleName := "k8s-master" + viper.GetString("cluster-name")
 	instanceProfileArnMaster := checkRole(masterRoleName)
 	if instanceProfileArnMaster == nil {
 		instanceProfileArnMaster = createRole(masterArn, masterRoleName)
+		waitForPolicy = true
 	}
 
 	minionRoleName := "k8s-minion" + viper.GetString("cluster-name")
 	instanceProfileArnMinion := checkRole(minionRoleName)
 	if instanceProfileArnMinion == nil {
 		instanceProfileArnMinion = createRole(minionArn, minionRoleName)
+		waitForPolicy = true
+	}
+
+	if waitForPolicy {
+		// TODO: instead of sleep, check for iam role to exist from ec2.
+		time.Sleep(time.Second * 60)
 	}
 
 	// S3 Bucket for certs
@@ -1680,9 +1868,7 @@ func main() {
 	}
 
 	if *action == "init" {
-		//TODO : allow aws to settle, make sure the iam profile name exists..
-		fmt.Println("waiting 60 seconds for IAM to sync with EC2")
-		time.Sleep(time.Second * 60)
+
 		masterUserData := generateUserDataFromTemplate("master-user-data.template", templateValuesMaster)
 		masterUserDataEncoded := base64.StdEncoding.EncodeToString([]byte(masterUserData))
 
