@@ -270,7 +270,7 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 
 // Add KubernetesCluster=<clustername> tag to a resource
 func tagIt(svc *ec2.EC2, ID *string) bool {
-	time.Sleep(2)
+	time.Sleep(10)
 	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
 		Resources: []*string{ID},
 		Tags: []*ec2.Tag{
@@ -288,7 +288,7 @@ func tagIt(svc *ec2.EC2, ID *string) bool {
 }
 
 func tagFor(svc *ec2.EC2, ID *string, tagFor string) bool {
-	time.Sleep(2)
+	time.Sleep(10)
 	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
 		Resources: []*string{ID},
 		Tags: []*ec2.Tag{
