@@ -341,6 +341,16 @@ func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 		MaxCount: aws.Int64(1),
 		MinCount: aws.Int64(1),
 		//EbsOptimized:          aws.Bool(true),
+		BlockDeviceMappings: []*ec2.BlockDeviceMapping{
+			{ // Required
+				DeviceName: aws.String("/dev/sda1"),
+				Ebs: &ec2.EbsBlockDevice{
+					DeleteOnTermination: aws.Bool(true),
+					//Iops:                aws.Int64(1),
+					VolumeSize: aws.Int64(100),
+				},
+			},
+		},
 		IamInstanceProfile: &ec2.IamInstanceProfileSpecification{
 			//Arn: aws.String(instanceProfileArn),
 			Name: aws.String("k8s-minion" + viper.GetString("cluster-name")),
@@ -1315,6 +1325,7 @@ func createELB(svc *ec2.EC2, elbsvc *elb.ELB, vpcID *string) (elbDNSName *string
 
 	// Configure Health Check
 	paramsHC := &elb.ConfigureHealthCheckInput{
+		LoadBalancerName: aws.String(viper.GetString("elb-name")),
 		HealthCheck: &elb.HealthCheck{
 			HealthyThreshold:   aws.Int64(2),
 			Interval:           aws.Int64(5),

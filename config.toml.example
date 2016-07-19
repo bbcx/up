@@ -2,7 +2,7 @@
 region="us-west-2"
 
 # AMI id
-ami="ami-1442ba74"
+ami="ami-d926ebb9"
 
 # SSH key name
 ssh-key-name="CHANGEME"
@@ -26,10 +26,10 @@ cluster-name="CHANGEME"
 cluster-cidr="10.244.0.0/16"
 
 # The range kubernetes will use for all 'services'
-service-cluster-ip-range="10.244.244.0/24"
+service-cluster-ip-range="10.0.0.0/16"
 
 # The service IP that kubernetes will use for DNS. Must be an address in the service-cluster-ip-range.
-cluster-dns="10.244.244.10"
+cluster-dns="10.0.0.10"
 
 # Certificate generation path where we manage the certificate authority.
 certificate-path="/full/path/to/up/k8s_certs"
