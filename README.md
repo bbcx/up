@@ -2,6 +2,9 @@
 
 Management of K8S on AWS.
 
+## Requirements
+* [install kubectl](http://kubernetes.io/docs/user-guide/prereqs/) but don't worry about configuring it.  Up will take care of that.
+
 ## Quick Install
 
 ```
