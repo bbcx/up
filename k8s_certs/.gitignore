@@ -2,3 +2,4 @@
 *.pem
 *.key
 *.srl
+*.cnf

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"strconv"
 	"strings"
 	"text/template"
@@ -423,7 +424,8 @@ func putObjS3(key string, content string) (success bool) {
 
 func generateSkyDNSConfig(kubeConfigValues userKubeConfig) {
 	targetFileName := "kube-dns-" + viper.GetString("cluster-name") + ".yaml"
-	templateText, err := ioutil.ReadFile("templates/kube_dns.yaml.template")
+
+	templateText, err := ioutil.ReadFile(path.Join(viper.GetString("template-path"), "kube_dns.yaml.template"))
 	tmpl, err := template.New("kubedns").Parse(string(templateText))
 	if err != nil {
 		panic(err)
@@ -445,7 +447,7 @@ func generateSkyDNSConfig(kubeConfigValues userKubeConfig) {
 }
 
 func generateUserLaptopKubeConfig(kubeConfigValues userKubeConfig) {
-	templateText, err := ioutil.ReadFile("templates/dot-kube-config.template")
+	templateText, err := ioutil.ReadFile(path.Join(viper.GetString("template-path"), "dot-kube-config.template"))
 	tmpl, err := template.New("userkube").Parse(string(templateText))
 	if err != nil {
 		panic(err)
@@ -453,6 +455,7 @@ func generateUserLaptopKubeConfig(kubeConfigValues userKubeConfig) {
 
 	f, err := os.Create(viper.GetString("kube-config-home"))
 	if err != nil {
+		fmt.Println("could not write to file", viper.GetString("kube-config-home"))
 		fmt.Println("create file: ", err)
 		panic("could not write file")
 	}
@@ -495,6 +498,8 @@ func generateSSL(fileTemplate string, sslSettings sslConf, generateCommand strin
 			fmt.Println(errExecCA)
 			fmt.Println(string(outCA))
 			panic("Fatal: error occured while running ./generate_ca.sh")
+		} else {
+			fmt.Println("generated certificate authority using path: " + viper.GetString("certificate-path"))
 		}
 	}
 
@@ -505,6 +510,8 @@ func generateSSL(fileTemplate string, sslSettings sslConf, generateCommand strin
 			fmt.Println(errExecAdmin)
 			fmt.Println(string(outAdmin))
 			panic("Fatal: error occured while running ./generate_admin_keypair.sh")
+		} else {
+			fmt.Println("generated admin keypair using path: " + viper.GetString("certificate-path"))
 		}
 	}
 
@@ -514,6 +521,8 @@ func generateSSL(fileTemplate string, sslSettings sslConf, generateCommand strin
 		fmt.Println(errExec)
 		fmt.Println(string(out))
 		panic("Fatal: error occured while running" + generateCommand)
+	} else {
+		fmt.Println("run: " + generateCommand + " using path: " + viper.GetString("certificate-path"))
 	}
 
 	apiKey, apiKeyErr := ioutil.ReadFile(name + "-key.pem")
@@ -1015,7 +1024,7 @@ func createPolicy(policyTemplateFile string, shortname string) (arn *string) {
 
 func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 	svc := iam.New(session.New())
-	assumeRoleBuf, err := ioutil.ReadFile("templates/assume-role-policy-document.json")
+	assumeRoleBuf, err := ioutil.ReadFile(path.Join(viper.GetString("template-path"), "assume-role-policy-document.json"))
 	assumeRole := string(assumeRoleBuf)
 
 	params := &iam.CreateRoleInput{
@@ -1557,15 +1566,17 @@ func deleteKubeELBs(svc *ec2.EC2, elbSvc *elb.ELB) bool {
 
 func waitForKubeOperational() {
 	done := false
+	fmt.Println("waiting for kubectl get nodes to exit successfully.")
 	for done == false {
-		out, errExec := exec.Command("kubectl", "get", "nodes").CombinedOutput()
+		_, errExec := exec.Command("kubectl", "get", "nodes").CombinedOutput()
 		if errExec != nil {
-
 			fmt.Println(errExec)
-			fmt.Println(string(out))
+			//fmt.Println(string(out))
+			fmt.Printf(".")
 			time.Sleep(time.Second * 5)
 		} else {
 			done = true
+			fmt.Println("Kubernetes api server responded")
 		}
 	}
 }
@@ -1717,16 +1728,38 @@ func main() {
 	}
 
 	viper.SetDefault("elb-name", "k8s-master-"+viper.GetString("cluster-name"))
+	// Set default path to kube config file and certificate store
+	viper.SetDefault("kube-config-home", path.Join(os.Getenv("HOME"), ".kube", "config"))
+	//fmt.Println("kubeconfighome" + viper.GetString("kube-config-home"))
+	viper.SetDefault("configuration-files-path", path.Join(os.Getenv("HOME"), ".kube", "k8s_certs_and_templates_"+viper.GetString("cluster-name")))
+
+	viper.SetDefault("template-path", path.Join(viper.GetString("configuration-files-path"), "templates"))
+	viper.SetDefault("certificate-path", path.Join(viper.GetString("configuration-files-path"), "k8s_certs"))
+
+	// Unpack Asset helpers into the configured paths
+	errorCerts := RestoreAssets(viper.GetString("configuration-files-path"), "k8s_certs")
+	if errorCerts != nil {
+		fmt.Println("Error writing template files")
+		fmt.Println(errorCerts)
+		os.Exit(1)
+	}
+	errorTemplates := RestoreAssets(viper.GetString("configuration-files-path"), "templates")
+	if errorTemplates != nil {
+		fmt.Println("Error writing template files")
+		fmt.Println(errorTemplates)
+		os.Exit(1)
+	}
 
 	// Flags
 	var action = flag.String("action", "", "Action can be: init, launch-minion")
 	flag.Parse()
 	switch *action {
 	case "":
-		panic("Please specify an action: init, launch-minion")
+		panic("Please specify an action: init, launch-minion, delete, generate-kube-config")
 	case "init":
 	case "launch-minion":
 	case "delete":
+	case "generate-kube-config":
 	default:
 		panic("Please specify an action: init, launch-minion, delete")
 	}
@@ -1781,52 +1814,84 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Begin Create
+	if *action == "generate-kube-config" {
+		elbDNSName := getELBDNSName(elbSvc)
+		// Drop in kube config for laptop user
+		kubeConfigValues := userKubeConfig{
+			"https://" + *elbDNSName,
+			viper.GetString("certificate-path") + "/ca.pem",
+			viper.GetString("certificate-path") + "/admin.pem",
+			viper.GetString("certificate-path") + "/admin-key.pem",
+		}
 
+		generateUserLaptopKubeConfig(kubeConfigValues)
+		fmt.Println("kubeconfig generated.")
+		os.Exit(0)
+	}
+
+	// Begin Create
 	vpcID := detectVPC(svc)
 	if vpcID == nil {
 		vpcID = createVPCNetworking(svc)
+	} else {
+		fmt.Println("Found VPC: " + *vpcID)
 	}
+
+	templateDir := viper.GetString("template-path")
 
 	waitForPolicy := false
 	// IAM Roles for Master and Minion
 	masterArn := checkPolicy("master")
 	if masterArn == nil {
-		masterArn = createPolicy("templates/kube-master-iam-policy.json", "master")
+		masterArn = createPolicy(path.Join(templateDir, "kube-master-iam-policy.json"), "master")
+		fmt.Println("created policy: " + *masterArn)
 		waitForPolicy = true
+	} else {
+		fmt.Println("found policy: " + *masterArn)
 	}
 
 	minionArn := checkPolicy("minion")
 	if minionArn == nil {
-		minionArn = createPolicy("templates/kube-minion-iam-policy.json", "minion")
+		minionArn = createPolicy(path.Join(templateDir, "kube-minion-iam-policy.json"), "minion")
+		fmt.Println("created policy: " + *minionArn)
 		waitForPolicy = true
+	} else {
+		fmt.Println("found policy: " + *minionArn)
 	}
 
 	masterRoleName := "k8s-master" + viper.GetString("cluster-name")
 	instanceProfileArnMaster := checkRole(masterRoleName)
 	if instanceProfileArnMaster == nil {
 		instanceProfileArnMaster = createRole(masterArn, masterRoleName)
+		fmt.Println("created role: " + *instanceProfileArnMaster)
 		waitForPolicy = true
+	} else {
+		fmt.Println("found role: " + *instanceProfileArnMaster)
 	}
 
 	minionRoleName := "k8s-minion" + viper.GetString("cluster-name")
 	instanceProfileArnMinion := checkRole(minionRoleName)
 	if instanceProfileArnMinion == nil {
 		instanceProfileArnMinion = createRole(minionArn, minionRoleName)
+		fmt.Println("created role: " + *instanceProfileArnMinion)
 		waitForPolicy = true
-	}
-
-	if waitForPolicy {
-		// TODO: instead of sleep, check for iam role to exist from ec2.
-		time.Sleep(time.Second * 60)
+	} else {
+		fmt.Println("found role: " + *instanceProfileArnMinion)
 	}
 
 	// S3 Bucket for certs
 	createS3Bucket()
 
+	if waitForPolicy {
+		// TODO: instead of sleep, check for iam role to exist from ec2.
+		fmt.Println("waiting for policy changes to syncronize")
+		time.Sleep(time.Second * 60)
+	}
+
 	// Sanity check S3 permission by writing test.
 	if putObjS3("preflight-check1.0", "preflight-check") == false {
-		panic("Fatal: Unable to write to s3 bucket.  Please check permissions and try again.")
+		fmt.Println("Error: Unable to write to s3 bucket.  Please check permissions and try again.  This bucket name may already be taken.")
+		os.Exit(1)
 	}
 
 	// Ensure Security groups are created and authorized
@@ -1834,19 +1899,27 @@ func main() {
 	masterSecurityGroupID := getSecurityGroup(svc, "Master")
 	if masterSecurityGroupID == nil {
 		masterSecurityGroupID = createSecurityGroup(svc, "Master", vpcID)
+		fmt.Println("created master security group: " + *masterSecurityGroupID)
 		authorize = true
+	} else {
+		fmt.Println("found master security group: " + *masterSecurityGroupID)
 	}
 	minionSecurityGroupID := getSecurityGroup(svc, "Minion")
 	if minionSecurityGroupID == nil {
 		minionSecurityGroupID = createSecurityGroup(svc, "Minion", vpcID)
+		fmt.Println("created minion security group: " + *minionSecurityGroupID)
 		authorize = true
+	} else {
+		fmt.Println("found minion security group: " + *minionSecurityGroupID)
 	}
 	// Create or lookup elb security group
 	ELBSecurityGroupID := getSecurityGroup(svc, "ELB")
 	if ELBSecurityGroupID == nil {
-		fmt.Printf("Creating security group for Kubernetes Master ELB.")
 		ELBSecurityGroupID = createSecurityGroup(svc, "ELB", vpcID)
+		fmt.Println("created master ELB security group: " + *ELBSecurityGroupID)
 		authorize = true
+	} else {
+		fmt.Println("found master ELB security group: " + *ELBSecurityGroupID)
 	}
 	if authorize == true {
 		fmt.Println("authorizing security groups for cluster communication")
@@ -1856,8 +1929,10 @@ func main() {
 	// ELB for master nodes
 	elbDNSName := getELBDNSName(elbSvc)
 	if elbDNSName == nil {
-		fmt.Printf("Creating ELB for %s", viper.GetString("elb-name"))
 		elbDNSName = createELB(svc, elbSvc, vpcID)
+		fmt.Println("created ELB for " + viper.GetString("elb-name") + ": " + *elbDNSName)
+	} else {
+		fmt.Println("found ELB DNS name: " + *elbDNSName)
 	}
 
 	// Security Groups for kube.  Lookup for launch uses Tagged with KubernetesCluster=cluster-name
@@ -1880,7 +1955,7 @@ func main() {
 
 	if *action == "init" {
 
-		masterUserData := generateUserDataFromTemplate("master-user-data.template", templateValuesMaster)
+		masterUserData := generateUserDataFromTemplate(path.Join(viper.GetString("template-path"), "master-user-data.template"), templateValuesMaster)
 		masterUserDataEncoded := base64.StdEncoding.EncodeToString([]byte(masterUserData))
 
 		// Launch Master(s)
@@ -1894,7 +1969,7 @@ func main() {
 				*elbDNSName,
 			}
 
-			apiPem, apiKey, ca := generateSSL("master-openssl.cnf.template",
+			apiPem, apiKey, ca := generateSSL(path.Join(viper.GetString("template-path"), "master-openssl.cnf.template"),
 				masterSSLSettings,
 				"./generate_api_keypair.sh",
 				"apiserver",
@@ -1904,7 +1979,6 @@ func main() {
 			putObjS3(*masterInstanceID+"-"+"apiserver.pem", apiPem)
 			putObjS3(*masterInstanceID+"-"+"apiserver-key.pem", apiKey)
 			putObjS3(*masterInstanceID+"-"+"ca.pem", ca)
-			// Instance Tags?
 
 			// Associate Master with ELB
 			assocMasterWithELB(elbSvc, masterInstanceID)
@@ -1925,7 +1999,7 @@ func main() {
 
 	if *action == "launch-minion" || *action == "init" {
 		// Generate User-data for minion.
-		minionUserData := generateUserDataFromTemplate("minion-user-data.template", templateValuesMaster)
+		minionUserData := generateUserDataFromTemplate(path.Join(viper.GetString("template-path"), "minion-user-data.template"), templateValuesMaster)
 		minionUserDataEncoded := base64.StdEncoding.EncodeToString([]byte(minionUserData))
 
 		times, _ := strconv.ParseInt(viper.GetString("minion-cluster-size"), 10, 0)
@@ -1941,7 +2015,7 @@ func main() {
 			}
 
 			// generate minion's keypair
-			minionPem, minionKey, minionCa := generateSSL("minion-openssl.cnf.template",
+			minionPem, minionKey, minionCa := generateSSL(path.Join(viper.GetString("template-path"), "minion-openssl.cnf.template"),
 				minionSSLSettings,
 				"./generate_minion_keypair.sh",
 				"minion",
@@ -1953,8 +2027,11 @@ func main() {
 			putObjS3(*minionInstanceID+"-"+"ca.pem", minionCa)
 		}
 
-		waitForKubeOperational()
-		loadDNSAddon()
+		// TODO: this will be moved into a more generic load addons feature as well
+		if *action == "init" {
+			waitForKubeOperational()
+			loadDNSAddon()
+		}
 	}
 
 	// Success

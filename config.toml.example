@@ -31,12 +31,6 @@ service-cluster-ip-range="10.0.0.0/16"
 # The service IP that kubernetes will use for DNS. Must be an address in the service-cluster-ip-range.
 cluster-dns="10.0.0.10"
 
-# Certificate generation path where we manage the certificate authority.
-certificate-path="/full/path/to/up/k8s_certs"
-
-# Kube config user home
-kube-config-home="/path/to/home/.kube/config"
-
 # Master Cluster Size
 master-cluster-size="1"
 

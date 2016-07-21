@@ -11,5 +11,6 @@ DNS.1 = kubernetes
 DNS.2 = kubernetes.default
 DNS.3 = kubernetes.default.svc
 DNS.4 = kubernetes.default.svc.cluster.local
-DNS.5 = kubernetes-testing-final3-411169035.us-west-2.elb.amazonaws.com
+DNS.5 = {{.ELBDNSName}}
 IP.2 = 127.0.0.1
+IP.3 = 10.0.0.1
