@@ -1114,14 +1114,14 @@ func setupSecurityGroupsAuth(svc *ec2.EC2, masterSecGroupID *string, minionSecGr
 		os.Exit(1)
 	}
 
-	// Setup Minion to Master  TODO: minion doesn't need this?
-	/*params1 := &ec2.AuthorizeSecurityGroupIngressInput{
+	// Setup Minion to Master port 6443 (API access)
+	params1 := &ec2.AuthorizeSecurityGroupIngressInput{
 		GroupId: masterSecGroupID,
 		IpPermissions: []*ec2.IpPermission{
 			{ // Required
-				FromPort:   aws.Int64(0),
+				FromPort:   aws.Int64(6443),
 				IpProtocol: aws.String("TCP"),
-				ToPort:     aws.Int64(65535),
+				ToPort:     aws.Int64(6443),
 				UserIdGroupPairs: []*ec2.UserIdGroupPair{
 					{ // Required
 						GroupId: minionSecGroupID,
@@ -1136,7 +1136,7 @@ func setupSecurityGroupsAuth(svc *ec2.EC2, masterSecGroupID *string, minionSecGr
 		fmt.Println(err1.Error())
 		fmt.Println("Could not authorize security group for Minion to Master")
 		os.Exit(1)
-	} */
+	}
 
 	// Setup Minion to Minion
 	params5 := &ec2.AuthorizeSecurityGroupIngressInput{
