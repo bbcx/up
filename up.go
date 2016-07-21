@@ -1570,7 +1570,7 @@ func waitForKubeOperational() {
 	for done == false {
 		_, errExec := exec.Command("kubectl", "get", "nodes").CombinedOutput()
 		if errExec != nil {
-			fmt.Println(errExec)
+			//fmt.Println(errExec)
 			//fmt.Println(string(out))
 			fmt.Printf(".")
 			time.Sleep(time.Second * 5)

@@ -16,6 +16,9 @@ go build up.go bindata.go
 cp config.toml.example config.toml
 ```
 
+## Configure for AWS Region
+If you're in a different region than us-west-2 choose the AMI for your region from the latest [release](https://blackbird.cx/post/blackbirdos-releases.html).
+
 ## Launching K8S
 ```
 ./up -action=init
