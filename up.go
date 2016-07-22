@@ -277,7 +277,7 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 			Name: aws.String("k8s-master" + viper.GetString("cluster-name")),
 		},
 		InstanceInitiatedShutdownBehavior: aws.String("terminate"),
-		InstanceType:                      aws.String("t2.micro"),
+		InstanceType:                      aws.String(viper.GetString("master-instance-type")),
 		KeyName:                           aws.String(viper.GetString("ssh-key-name")),
 		SecurityGroupIds: []*string{
 			masterSecurityGroupID,
@@ -386,7 +386,7 @@ func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 			Name: aws.String("k8s-minion" + viper.GetString("cluster-name")),
 		},
 		InstanceInitiatedShutdownBehavior: aws.String("terminate"),
-		InstanceType:                      aws.String("t2.micro"),
+		InstanceType:                      aws.String(viper.GetString("minion-instance-type")),
 		KeyName:                           aws.String(viper.GetString("ssh-key-name")),
 		SecurityGroupIds: []*string{
 			securityGroupID,
@@ -1888,6 +1888,8 @@ func main() {
 
 	viper.SetDefault("template-path", path.Join(viper.GetString("configuration-files-path"), "templates"))
 	viper.SetDefault("certificate-path", path.Join(viper.GetString("configuration-files-path"), "k8s_certs"))
+	viper.SetDefault("minion-instance-type", "t2.micro")
+	viper.SetDefault("master-instance-type", "t2.micro")
 
 	// Unpack Asset helpers into the configured paths
 	errorCerts := RestoreAssets(viper.GetString("configuration-files-path"), "k8s_certs")

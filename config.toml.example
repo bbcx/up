@@ -33,6 +33,9 @@ cluster-dns="10.0.0.10"
 
 # Master Cluster Size
 master-cluster-size="1"
+master-instance-type="t2.micro"
 
 # Minion Cluster Size
 minion-cluster-size="1"
+minion-instance-type="t2.micro"
+
