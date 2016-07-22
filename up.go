@@ -377,7 +377,7 @@ func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 				Ebs: &ec2.EbsBlockDevice{
 					DeleteOnTermination: aws.Bool(true),
 					//Iops:                aws.Int64(1),
-					VolumeSize: aws.Int64(100),
+					VolumeSize: aws.Int64(int64(viper.GetInt("minion-root-volume-size"))),
 				},
 			},
 		},
@@ -1127,6 +1127,30 @@ func createRole(policyArn *string, roleName string) (instanceRoleArn *string) {
 }
 
 func setupSecurityGroupsAuth(svc *ec2.EC2, masterSecGroupID *string, minionSecGroupID *string, ELBSecurityGroupID *string) {
+	// Setup Master to Master Etcd
+	paramsMMEtcd := &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: masterSecGroupID,
+		IpPermissions: []*ec2.IpPermission{
+			{ // Required
+				FromPort:   aws.Int64(0),
+				IpProtocol: aws.String("TCP"),
+				ToPort:     aws.Int64(65535),
+				UserIdGroupPairs: []*ec2.UserIdGroupPair{
+					{ // Required
+						GroupId: masterSecGroupID,
+					},
+				},
+			},
+		},
+	}
+	_, errMMEtcd := svc.AuthorizeSecurityGroupIngress(paramsMMEtcd)
+
+	if errMMEtcd != nil {
+		fmt.Println(errMMEtcd.Error())
+		fmt.Println("Could not authorize security group for Master to Master Etcd")
+		os.Exit(1)
+	}
+
 	// Setup Master SSH
 	paramsMasterSSH := &ec2.AuthorizeSecurityGroupIngressInput{
 		CidrIp:     aws.String("0.0.0.0/0"),
@@ -1890,6 +1914,7 @@ func main() {
 	viper.SetDefault("certificate-path", path.Join(viper.GetString("configuration-files-path"), "k8s_certs"))
 	viper.SetDefault("minion-instance-type", "t2.micro")
 	viper.SetDefault("master-instance-type", "t2.micro")
+	viper.SetDefault("minion-root-volume-size", 50)
 
 	// Unpack Asset helpers into the configured paths
 	errorCerts := RestoreAssets(viper.GetString("configuration-files-path"), "k8s_certs")

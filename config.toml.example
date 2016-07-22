@@ -38,4 +38,6 @@ master-instance-type="t2.micro"
 # Minion Cluster Size
 minion-cluster-size="1"
 minion-instance-type="t2.micro"
+# Minion Root Volume size (in Gigabytes)
+minion-root-volume-size=100
 
