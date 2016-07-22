@@ -109,7 +109,9 @@ func deleteSecGroupsExtra(svc *ec2.EC2) {
 
 	for i := range resp.SecurityGroups {
 		stripSecGroup(svc, resp.SecurityGroups[i].GroupId)
+		fmt.Print("deleting security groups created by k8s services ")
 		deleteSecGroup(svc, resp.SecurityGroups[i].GroupId, 0)
+		fmt.Println()
 	}
 }
 
@@ -925,8 +927,9 @@ func deleteVPC(svc *ec2.EC2) {
 		fmt.Printf("VPC: not found")
 		return
 	}
-	fmt.Println("delete VPC: " + *vpcID)
+	fmt.Print("delete VPC: " + *vpcID)
 	deleteVPCRetry(svc, vpcID, 0)
+	fmt.Println()
 }
 
 func deleteVPCRetry(svc *ec2.EC2, vpcID *string, retryCount int64) {
@@ -1022,6 +1025,7 @@ func deleteELB(elbsvc *elb.ELB, name string) bool {
 		fmt.Println(err)
 	}
 
+	fmt.Println("deleted ELB: " + name)
 	return true
 }
 
@@ -1466,7 +1470,7 @@ func deleteIGW(svc *ec2.EC2) bool {
 		return false
 	}
 
-	fmt.Println("delete IGW: " + *resp.InternetGateways[0].InternetGatewayId)
+	fmt.Print("delete IGW: " + *resp.InternetGateways[0].InternetGatewayId)
 
 	paramsDetach := &ec2.DetachInternetGatewayInput{
 		InternetGatewayId: resp.InternetGateways[0].InternetGatewayId,
@@ -1482,6 +1486,7 @@ func deleteIGW(svc *ec2.EC2) bool {
 	}
 
 	deleteIGWRetry(svc, resp.InternetGateways[0].InternetGatewayId, 0)
+	fmt.Println()
 	return true
 }
 
@@ -1532,8 +1537,9 @@ func deleteRouteTable(svc *ec2.EC2) bool {
 		}
 		return false
 	}
-	fmt.Println("delete Route Table: " + *resp.RouteTables[0].RouteTableId)
+	fmt.Print("delete Route Table: " + *resp.RouteTables[0].RouteTableId)
 	deleteRouteTableRetry(svc, resp.RouteTables[0].RouteTableId, 0)
+	fmt.Println()
 	return true
 }
 
@@ -1581,9 +1587,9 @@ func deleteDhcpOptionSet(svc *ec2.EC2) bool {
 		fmt.Println(err)
 		return false
 	}
-	fmt.Println("delete DHCP options set: " + *resp.DhcpOptions[0].DhcpOptionsId)
+	fmt.Print("delete DHCP options set: " + *resp.DhcpOptions[0].DhcpOptionsId)
 	deleteDhcpOptionsRetry(svc, resp.DhcpOptions[0].DhcpOptionsId, 0)
-
+	fmt.Println()
 	return true
 }
 
@@ -1666,7 +1672,7 @@ func deleteSubnets(svc *ec2.EC2) bool {
 			allSuccess = false
 		}
 	}
-
+	fmt.Println()
 	return allSuccess
 }
 
@@ -1703,7 +1709,6 @@ func deleteKubeELBs(svc *elb.ELB) bool {
 			for k := range tagResp.TagDescriptions[0].Tags {
 				if *tagResp.TagDescriptions[0].Tags[k].Key == "KubernetesCluster" && *tagResp.TagDescriptions[0].Tags[k].Value == viper.GetString("cluster-name") {
 					deleteELB(svc, *tagResp.TagDescriptions[0].LoadBalancerName)
-					fmt.Println("deleted k8s service elb: " + *tagResp.TagDescriptions[0].LoadBalancerName)
 				}
 			}
 		}
@@ -1939,11 +1944,11 @@ func main() {
 		stripSecGroup(svc, minionSecGroupID)
 
 		// Security Groups (tagged)
+		fmt.Print("deleting security groups ")
 		deleteSecGroup(svc, elbSecGroupID, 0)
-
 		deleteSecGroup(svc, masterSecGroupID, 0)
-
 		deleteSecGroup(svc, minionSecGroupID, 0)
+		fmt.Println()
 
 		deleteSecGroupsExtra(svc)
 
