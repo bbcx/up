@@ -86,6 +86,33 @@ func ensureRouteTable(svc *ec2.EC2) (success bool) {
 	return true
 }
 
+func deleteSecGroupsExtra(svc *ec2.EC2) {
+	params := &ec2.DescribeSecurityGroupsInput{
+		Filters: []*ec2.Filter{
+			{ // Required
+				Name: aws.String("tag:KubernetesCluster"),
+				Values: []*string{
+					aws.String(viper.GetString("cluster-name")),
+				},
+			},
+		},
+	}
+	resp, err := svc.DescribeSecurityGroups(params)
+
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+
+	if len(resp.SecurityGroups) == 0 {
+		return
+	}
+
+	for i := range resp.SecurityGroups {
+		stripSecGroup(svc, resp.SecurityGroups[i].GroupId)
+		deleteSecGroup(svc, resp.SecurityGroups[i].GroupId, 0)
+	}
+}
+
 func getSecurityGroup(svc *ec2.EC2, kindOf string) *string {
 	params := &ec2.DescribeSecurityGroupsInput{
 		Filters: []*ec2.Filter{
@@ -583,11 +610,11 @@ func deleteInstances(svc *ec2.EC2) bool {
 	}
 
 	for i := 0; i < len(resp.Reservations); i++ {
-		fmt.Println(*resp.Reservations[i].Instances[0].InstanceId)
+		fmt.Println("terminating: " + *resp.Reservations[i].Instances[0].InstanceId)
 		terminateInstance(svc, resp.Reservations[i].Instances[0].InstanceId)
 	}
 	for k := 0; k < len(resp.Reservations); k++ {
-		fmt.Println(*resp.Reservations[k].Instances[0].InstanceId)
+		fmt.Println("waiting for termination: " + *resp.Reservations[k].Instances[0].InstanceId)
 		waitInstanceTerminated(svc, resp.Reservations[k].Instances[0].InstanceId)
 	}
 	return true
@@ -761,7 +788,7 @@ func createVPCNetworking(svc *ec2.EC2) *string {
 		return nil
 	}
 
-	fmt.Println("Got route table: " + *rtResp.RouteTables[0].RouteTableId)
+	fmt.Println("Created route table: " + *rtResp.RouteTables[0].RouteTableId)
 
 	// Tag the VPC and route tables
 	tagIt(svc, vpcID)
@@ -895,20 +922,30 @@ func deleteVPC(svc *ec2.EC2) {
 	vpcID := detectVPC(svc)
 
 	if vpcID == nil {
-		fmt.Printf("Could not find VPC for KubernetesCluster=%s.  Nothing to do.\n", viper.GetString("cluster-name"))
+		fmt.Printf("VPC: not found")
 		return
 	}
+	fmt.Println("delete VPC: " + *vpcID)
+	deleteVPCRetry(svc, vpcID, 0)
+}
 
+func deleteVPCRetry(svc *ec2.EC2, vpcID *string, retryCount int64) {
 	params := &ec2.DeleteVpcInput{
 		VpcId: vpcID,
 	}
 	_, err := svc.DeleteVpc(params)
 
-	if err != nil {
-		// Print the error, cast err to awserr.Error to get the Code and
-		// Message from an error.
-		fmt.Println(err.Error())
-		return
+	if awsErr, ok := err.(awserr.Error); ok {
+		if awsErr.Code() == "DependencyViolation" {
+			fmt.Print(".")
+			retryCount++
+			if retryCount > 60 {
+				fmt.Println("retry limit reached for vpc deletion.")
+				return
+			}
+			time.Sleep(time.Second * 5)
+			deleteVPCRetry(svc, vpcID, retryCount)
+		}
 	}
 }
 
@@ -974,9 +1011,9 @@ func getELBDNSName(elbsvc *elb.ELB) (elbDNSName *string) {
 	return resp.LoadBalancerDescriptions[0].DNSName
 }
 
-func deleteMasterELB(elbsvc *elb.ELB) bool {
+func deleteELB(elbsvc *elb.ELB, name string) bool {
 	params := &elb.DeleteLoadBalancerInput{
-		LoadBalancerName: aws.String(viper.GetString("elb-name")),
+		LoadBalancerName: aws.String(name),
 	}
 
 	_, err := elbsvc.DeleteLoadBalancer(params)
@@ -1355,15 +1392,53 @@ func createELB(svc *ec2.EC2, elbsvc *elb.ELB, vpcID *string) (elbDNSName *string
 
 }
 
-func deleteSecGroup(svc *ec2.EC2, secGroupID *string) bool {
+func stripSecGroup(svc *ec2.EC2, secGroupID *string) {
+	// First detangle the group from other groups.
+	paramsDesc := &ec2.DescribeSecurityGroupsInput{
+		GroupIds: []*string{secGroupID},
+	}
+
+	respDesc, errDesc := svc.DescribeSecurityGroups(paramsDesc)
+	if errDesc != nil {
+		fmt.Println("error describing security groups")
+		fmt.Println(errDesc)
+	}
+
+	paramsDeleteRules := &ec2.RevokeSecurityGroupIngressInput{
+		GroupId:       secGroupID,
+		IpPermissions: respDesc.SecurityGroups[0].IpPermissions,
+	}
+
+	_, err := svc.RevokeSecurityGroupIngress(paramsDeleteRules)
+	if err != nil {
+		fmt.Println("error removing rules from security group")
+		fmt.Println(err)
+		return
+	}
+	fmt.Println("removed rules from: " + *secGroupID)
+
+}
+
+func deleteSecGroup(svc *ec2.EC2, secGroupID *string, retryCount int64) bool {
 	params := &ec2.DeleteSecurityGroupInput{
 		GroupId: secGroupID,
 	}
-
 	_, err := svc.DeleteSecurityGroup(params)
 	if err != nil {
-		fmt.Println("error deleting security group")
-		fmt.Println(err)
+		if awsErr, ok := err.(awserr.Error); ok {
+			if awsErr.Code() == "DependencyViolation" {
+				fmt.Print(".")
+				retryCount++
+				if retryCount > 60 {
+					fmt.Println("retry limit reached for security group deletion.")
+					return false
+				}
+				time.Sleep(time.Second * 5)
+				deleteSecGroup(svc, secGroupID, retryCount)
+			}
+		} else {
+			fmt.Println(err.Error())
+		}
 		return false
 	}
 
@@ -1384,10 +1459,14 @@ func deleteIGW(svc *ec2.EC2) bool {
 
 	resp, err := svc.DescribeInternetGateways(params)
 	if err != nil || len(resp.InternetGateways) == 0 {
-		fmt.Println("could not lookup IGW")
-		fmt.Println(err)
+		fmt.Println("IGW: not found")
+		if err != nil {
+			fmt.Println(err)
+		}
 		return false
 	}
+
+	fmt.Println("delete IGW: " + *resp.InternetGateways[0].InternetGatewayId)
 
 	paramsDetach := &ec2.DetachInternetGatewayInput{
 		InternetGatewayId: resp.InternetGateways[0].InternetGatewayId,
@@ -1402,18 +1481,33 @@ func deleteIGW(svc *ec2.EC2) bool {
 		return false
 	}
 
+	deleteIGWRetry(svc, resp.InternetGateways[0].InternetGatewayId, 0)
+	return true
+}
+
+func deleteIGWRetry(svc *ec2.EC2, IGWID *string, retryCount int64) bool {
 	paramsDelete := &ec2.DeleteInternetGatewayInput{
-		InternetGatewayId: resp.InternetGateways[0].InternetGatewayId,
+		InternetGatewayId: IGWID,
 	}
 
 	_, errDelete := svc.DeleteInternetGateway(paramsDelete)
 
 	if errDelete != nil {
-		fmt.Println("error deleting IGW")
-		fmt.Println(errDelete)
-		return false
+		if awsErr, ok := errDelete.(awserr.Error); ok {
+			if awsErr.Code() == "DependencyViolation" {
+				fmt.Print(".")
+				retryCount++
+				if retryCount > 60 {
+					fmt.Println("retry limit reached for IGW deletion.")
+					return false
+				}
+				time.Sleep(time.Second * 5)
+				deleteIGWRetry(svc, IGWID, retryCount)
+			}
+		} else {
+			fmt.Println(errDelete.Error())
+		}
 	}
-
 	return true
 }
 
@@ -1432,23 +1526,40 @@ func deleteRouteTable(svc *ec2.EC2) bool {
 	resp, err := svc.DescribeRouteTables(params)
 
 	if err != nil || len(resp.RouteTables) == 0 {
-		fmt.Println("error describing route tables or no route table found")
-		fmt.Println(err)
+		fmt.Println("Route Table: not found")
+		if err != nil {
+			fmt.Println(err)
+		}
 		return false
 	}
+	fmt.Println("delete Route Table: " + *resp.RouteTables[0].RouteTableId)
+	deleteRouteTableRetry(svc, resp.RouteTables[0].RouteTableId, 0)
+	return true
+}
 
+func deleteRouteTableRetry(svc *ec2.EC2, routeTableID *string, retryCount int64) {
 	paramsDelete := &ec2.DeleteRouteTableInput{
-		RouteTableId: resp.RouteTables[0].RouteTableId,
+		RouteTableId: routeTableID,
 	}
 
 	_, errDelete := svc.DeleteRouteTable(paramsDelete)
 
 	if errDelete != nil {
-		fmt.Println("failed to delete route table")
-		fmt.Println(errDelete)
-		return false
+		if awsErr, ok := errDelete.(awserr.Error); ok {
+			if awsErr.Code() == "DependencyViolation" {
+				fmt.Print(".")
+				retryCount++
+				if retryCount > 60 {
+					fmt.Println("retry limit reached for dhcpOptions deletion.")
+					return
+				}
+				time.Sleep(time.Second * 5)
+				deleteRouteTableRetry(svc, routeTableID, retryCount)
+			}
+		} else {
+			fmt.Println(errDelete)
+		}
 	}
-	return true
 }
 
 func deleteDhcpOptionSet(svc *ec2.EC2) bool {
@@ -1470,23 +1581,38 @@ func deleteDhcpOptionSet(svc *ec2.EC2) bool {
 		fmt.Println(err)
 		return false
 	}
+	fmt.Println("delete DHCP options set: " + *resp.DhcpOptions[0].DhcpOptionsId)
+	deleteDhcpOptionsRetry(svc, resp.DhcpOptions[0].DhcpOptionsId, 0)
 
+	return true
+}
+
+func deleteDhcpOptionsRetry(svc *ec2.EC2, dhcpOptionsID *string, retryCount int64) {
 	paramsDelete := &ec2.DeleteDhcpOptionsInput{
-		DhcpOptionsId: resp.DhcpOptions[0].DhcpOptionsId,
+		DhcpOptionsId: dhcpOptionsID,
 	}
 
 	_, respErr := svc.DeleteDhcpOptions(paramsDelete)
 
 	if respErr != nil {
-		fmt.Println("error deleting dhcp options set")
-		fmt.Println(respErr)
-		return false
+		if awsErr, ok := respErr.(awserr.Error); ok {
+			if awsErr.Code() == "DependencyViolation" {
+				fmt.Print(".")
+				retryCount++
+				if retryCount > 60 {
+					fmt.Println("retry limit reached for dhcpOptions deletion.")
+					return
+				}
+				time.Sleep(time.Second * 5)
+				deleteIGWRetry(svc, dhcpOptionsID, retryCount)
+			}
+		} else {
+			fmt.Println(respErr.Error())
+		}
 	}
-
-	return true
 }
 
-func deleteSubnet(svc *ec2.EC2, subnetID *string) bool {
+func deleteSubnet(svc *ec2.EC2, subnetID *string, retryCount int64) bool {
 	params := &ec2.DeleteSubnetInput{
 		SubnetId: subnetID,
 	}
@@ -1494,9 +1620,20 @@ func deleteSubnet(svc *ec2.EC2, subnetID *string) bool {
 	_, err := svc.DeleteSubnet(params)
 
 	if err != nil {
-		fmt.Println("error deleting subnet")
-		fmt.Println(err)
-		return false
+		if awsErr, ok := err.(awserr.Error); ok {
+			if awsErr.Code() == "DependencyViolation" {
+				fmt.Print(".")
+				retryCount++
+				if retryCount > 60 {
+					fmt.Println("retry limit reached for subnet deletion.")
+					return false
+				}
+				time.Sleep(time.Second * 5)
+				deleteSubnet(svc, subnetID, retryCount)
+			}
+		} else {
+			fmt.Println(err.Error())
+		}
 	}
 
 	return true
@@ -1524,7 +1661,8 @@ func deleteSubnets(svc *ec2.EC2) bool {
 
 	allSuccess := true
 	for i := 0; i < len(resp.Subnets); i++ {
-		if deleteSubnet(svc, resp.Subnets[i].SubnetId) == false {
+		fmt.Println("delete subnet: " + *resp.Subnets[i].SubnetId)
+		if deleteSubnet(svc, resp.Subnets[i].SubnetId, 0) == false {
 			allSuccess = false
 		}
 	}
@@ -1546,21 +1684,31 @@ func waitInstanceTerminated(svc *ec2.EC2, instanceID *string) bool {
 	return true
 }
 
-func deleteKubeELBs(svc *ec2.EC2, elbSvc *elb.ELB) bool {
-	/*paramsDescribe := &ec2.DescribeTagsInput{
-		Filters: []*ec2.Filter{
-			{
-				Name: aws.String("tag:KubernetesCluster"),
-				Values: []*string{
-					aws.String(viper.GetString("cluster-name")),
-				},
-			},
-		},
-	}
+func deleteKubeELBs(svc *elb.ELB) bool {
+	params := &elb.DescribeLoadBalancersInput{}
+	pageNum := 0
 
-	respTags, errTags := svc.DescribeTags(paramsDescribe)
-
-	respTags.Tags[0].ResourceType */
+	svc.DescribeLoadBalancersPages(params, func(page *elb.DescribeLoadBalancersOutput, lastpage bool) bool {
+		pageNum++
+		for i := 0; i < len(page.LoadBalancerDescriptions); i++ {
+			thisName := page.LoadBalancerDescriptions[i].LoadBalancerName
+			getTagsParams := &elb.DescribeTagsInput{
+				LoadBalancerNames: []*string{thisName},
+			}
+			tagResp, tagErr := svc.DescribeTags(getTagsParams)
+			if tagErr != nil {
+				fmt.Println("Error describing tags for ELB")
+				fmt.Println(tagErr)
+			}
+			for k := range tagResp.TagDescriptions[0].Tags {
+				if *tagResp.TagDescriptions[0].Tags[k].Key == "KubernetesCluster" && *tagResp.TagDescriptions[0].Tags[k].Value == viper.GetString("cluster-name") {
+					deleteELB(svc, *tagResp.TagDescriptions[0].LoadBalancerName)
+					fmt.Println("deleted k8s service elb: " + *tagResp.TagDescriptions[0].LoadBalancerName)
+				}
+			}
+		}
+		return lastpage
+	})
 	return true
 }
 
@@ -1754,46 +1902,50 @@ func main() {
 	var action = flag.String("action", "", "Action can be: init, launch-minion")
 	flag.Parse()
 	switch *action {
-	case "":
-		panic("Please specify an action: init, launch-minion, delete, generate-kube-config")
 	case "init":
 	case "launch-minion":
 	case "delete":
 	case "generate-kube-config":
 	default:
-		panic("Please specify an action: init, launch-minion, delete")
+		fmt.Println("Usage:  up -action=<ACTION>  Please specify an action: init, launch-minion, delete.")
+		os.Exit(1)
 	}
 
 	svc := ec2.New(session.New(), &aws.Config{Region: aws.String(viper.GetString("region"))})
 	elbSvc := elb.New(session.New(), &aws.Config{Region: aws.String(viper.GetString("region"))})
 
 	if *action == "delete" {
-		//teardown: TODO: IAM Policies, IAM Roles
 		/* fmt.Printf("Tearing down K8S cluster for tag: %s\n", viper.GetString("cluster-name"))
 		fmt.Println("Press 'Enter' to continue... CTRL-C to abort.")
 		bufio.NewReader(os.Stdin).ReadBytes('\n') */
 
-		// start with instances
+		// start with instances (tagged)
 		deleteInstances(svc)
 
-		// then elbs
-		// TODO: teardown ELBs that were created by K8S controller also (tags look slightly wrong on these (missing cluster-name))
-		deleteMasterELB(elbSvc)
+		// then elbs (tagged)
+		deleteELB(elbSvc, viper.GetString("elb-name"))
 
-		deleteKubeELBs(svc, elbSvc)
+		deleteKubeELBs(elbSvc)
 
 		deletePoliciesRoles()
 
-		// ToDO: wait for instances and stuff to die off before deleting or they can't be deleted.
-		// Security Groups
-		masterSecGroupID := getSecurityGroup(svc, "Master")
-		deleteSecGroup(svc, masterSecGroupID)
-
-		minionSecGroupID := getSecurityGroup(svc, "Minion")
-		deleteSecGroup(svc, minionSecGroupID)
-
+		// Remove references from security groups so they can be deleted
 		elbSecGroupID := getSecurityGroup(svc, "ELB")
-		deleteSecGroup(svc, elbSecGroupID)
+		masterSecGroupID := getSecurityGroup(svc, "Master")
+		minionSecGroupID := getSecurityGroup(svc, "Minion")
+
+		stripSecGroup(svc, elbSecGroupID)
+		stripSecGroup(svc, masterSecGroupID)
+		stripSecGroup(svc, minionSecGroupID)
+
+		// Security Groups (tagged)
+		deleteSecGroup(svc, elbSecGroupID, 0)
+
+		deleteSecGroup(svc, masterSecGroupID, 0)
+
+		deleteSecGroup(svc, minionSecGroupID, 0)
+
+		deleteSecGroupsExtra(svc)
 
 		// IGW (tagged)
 		deleteIGW(svc)
@@ -1884,7 +2036,7 @@ func main() {
 
 	if waitForPolicy {
 		// TODO: instead of sleep, check for iam role to exist from ec2.
-		fmt.Println("waiting for policy changes to syncronize")
+		fmt.Println("waiting for policy changes to sync")
 		time.Sleep(time.Second * 60)
 	}
 
