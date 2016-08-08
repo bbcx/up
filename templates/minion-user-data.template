@@ -7,9 +7,9 @@ write_files:
       #!/bin/bash -e
       mkdir -p /etc/kubernetes/ssl
       instance_id=$(curl 169.254.169.254/latest/meta-data/instance-id)
-      aws s3 cp s3://{{.SSLStorageBucket}}/${instance_id}-minion.pem /etc/kubernetes/ssl/minion.pem
-      aws s3 cp s3://{{.SSLStorageBucket}}/${instance_id}-minion-key.pem /etc/kubernetes/ssl/minion-key.pem
-      aws s3 cp s3://{{.SSLStorageBucket}}/${instance_id}-ca.pem /etc/kubernetes/ssl/ca.pem
+      aws s3 cp s3://{{.SSLStorageBucket}}/{{.ClusterName}}/${instance_id}-minion.pem /etc/kubernetes/ssl/minion.pem
+      aws s3 cp s3://{{.SSLStorageBucket}}/{{.ClusterName}}/${instance_id}-minion-key.pem /etc/kubernetes/ssl/minion-key.pem
+      aws s3 cp s3://{{.SSLStorageBucket}}/{{.ClusterName}}/${instance_id}-ca.pem /etc/kubernetes/ssl/ca.pem
       chown kube:kube /etc/kubernetes/ssl/*.pem
       chmod 0600 /etc/kubernetes/ssl/*.pem
       systemctl start kubelet

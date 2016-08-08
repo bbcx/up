@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -49,7 +51,8 @@ type userKubeConfig struct {
 }
 
 type policyConf struct {
-	S3Bucket string
+	S3Bucket    string
+	ClusterName string
 }
 
 func ensureRouteTable(svc *ec2.EC2) (success bool) {
@@ -665,7 +668,6 @@ func detectVPC(svc *ec2.EC2) (vpcID *string) {
 	if len(resp.Vpcs) == 0 {
 		return nil
 	}
-
 	//fmt.Println(resp)
 	return resp.Vpcs[0].VpcId
 }
@@ -708,7 +710,27 @@ func createDhcpOptionsSet(svc *ec2.EC2) *string {
 	return resp.DhcpOptions.DhcpOptionsId
 }
 
+func vpcCheckConflict(svc *ec2.EC2) bool {
+	// Todo we must paginate
+	params := &ec2.DescribeVpcsInput{}
+	resp, err := svc.DescribeVpcs(params)
+	handleError(err, "Error describing VPCs")
+	for i := range resp.Vpcs {
+		if *resp.Vpcs[i].CidrBlock == viper.GetString("vpc-cidr-block") {
+			fmt.Println("Error.  Conflicting VPC CIDR block detected.  In use by " + *resp.Vpcs[i].VpcId)
+			usedConf := viper.ConfigFileUsed()
+			fmt.Println("Please modify " + usedConf + " config to select a different cidr block and re-run.")
+			return true
+		}
+	}
+	return false
+}
+
 func createVPCNetworking(svc *ec2.EC2) *string {
+	if vpcCheckConflict(svc) {
+		fmt.Println("Exiting")
+		os.Exit(1)
+	}
 	params := &ec2.CreateVpcInput{
 		CidrBlock: aws.String(viper.GetString("vpc-cidr-block")), // Required
 		//InstanceTenancy: aws.String("??"),
@@ -1032,6 +1054,7 @@ func deleteELB(elbsvc *elb.ELB, name string) bool {
 func createPolicy(policyTemplateFile string, shortname string) (arn *string) {
 	templateValues := policyConf{
 		viper.GetString("s3-ca-storage-bucket"),
+		viper.GetString("cluster-name"),
 	}
 	masterTemplateText := generatePolicyFromTemplate(policyTemplateFile, templateValues)
 
@@ -1893,6 +1916,70 @@ func deletePoliciesRoles() {
 	}
 }
 
+func createSSHKey(svc *ec2.EC2) bool {
+	descParams := &ec2.DescribeKeyPairsInput{
+		KeyNames: []*string{aws.String(viper.GetString("ssh-key-name"))},
+	}
+
+	respDesc, errDesc := svc.DescribeKeyPairs(descParams)
+	if errDesc != nil {
+		if awsErr, ok := errDesc.(awserr.Error); ok {
+			if awsErr.Code() == "InvalidKeyPair.NotFound" {
+				// simply continue, we will create the key.
+			} else {
+				handleError(errDesc, "Error describing key pairs")
+			}
+		} else {
+			handleError(errDesc, "Error describing key pairs")
+		}
+	}
+
+	if respDesc.KeyPairs == nil {
+		createParams := &ec2.CreateKeyPairInput{
+			KeyName: aws.String(viper.GetString("ssh-key-name")),
+		}
+
+		respCreate, errCreate := svc.CreateKeyPair(createParams)
+		handleError(errCreate, "Error creating ssh key pair")
+
+		keyFileName := path.Join(os.Getenv("HOME"), ".launch", viper.GetString("cluster-name"), "id_rsa")
+		keyMaterial := []byte(*respCreate.KeyMaterial)
+		handleError(ioutil.WriteFile(keyFileName, keyMaterial, 0400), "error writing to "+keyFileName)
+
+		// Nice to have but not necessary at all, public key generation.
+		//block, _ := pem.Decode(keyMaterial)
+		//cert, err := x509.ParseCertificate(block.Bytes)
+		//handleError(err, "could not parse private key")
+		//rsaPublicKey := cert.PublicKey.(*rsa.PublicKey)
+		//handleError(ioutil.WriteFile(string(rsaPublicKey.E), append([]byte(".pub"), keyFileName...), 0400), "could not write public key")
+		//fmt.Printf("created rsa keypair %s in %s", viper.GetString("ssh-key-name"), keyFileName)
+	}
+	return true
+}
+
+func handleError(err error, message string) {
+	if err != nil {
+		os.Stderr.WriteString(message)
+		fmt.Println(os.Stderr, err)
+		os.Stderr.WriteString("Exiting.")
+		os.Exit(1)
+	}
+	return
+}
+
+func newUUID() (string, error) {
+	uuid := make([]byte, 16)
+	n, err := io.ReadFull(rand.Reader, uuid)
+	if n != len(uuid) || err != nil {
+		return "", err
+	}
+	// variant bits; see section 4.1.1
+	uuid[8] = uuid[8]&^0xc0 | 0x80
+	// version 4 (pseudo-random); see section 4.1.3
+	uuid[6] = uuid[6]&^0xf0 | 0x40
+	return fmt.Sprintf("%x-%x-%x-%x-%x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:]), nil
+}
+
 func main() {
 
 	// Flags
@@ -1908,14 +1995,25 @@ func main() {
 		fmt.Println("Usage:  up -action=<ACTION>  Please specify an action: init, launch-minion, delete.")
 		os.Exit(1)
 	}
-	if *confFile == "" {
-		viper.SetConfigName("config")
-	} else {
-		viper.SetConfigName(*confFile)
-		fmt.Println("loading viper config from " + *confFile)
+
+	defaultClusterName := "launch-default"
+	defaultConfigFilePath := path.Join(os.Getenv("HOME"), ".launch", defaultClusterName)
+	defaultViperConfig := path.Join(defaultConfigFilePath, "config", "config.toml")
+
+	if _, errDefaultExists := os.Stat(defaultViperConfig); os.IsNotExist(errDefaultExists) {
+		// Default config does not exist.  Create it.
+		errorConfigDefault := RestoreAsset(defaultConfigFilePath, "config/config.toml")
+		handleError(errorConfigDefault, "Error creating default config.")
 	}
 
-	viper.AddConfigPath(".")
+	viper.SetConfigName("config")
+
+	if *confFile == "" {
+		viper.AddConfigPath(path.Join(defaultConfigFilePath, "config"))
+	} else {
+		viper.AddConfigPath(*confFile)
+	}
+
 	viper.SetEnvPrefix("BB")
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -1926,15 +2024,34 @@ func main() {
 
 	viper.SetDefault("elb-name", "k8s-master-"+viper.GetString("cluster-name"))
 	// Set default path to kube config file and certificate store
-	viper.SetDefault("kube-config-home", path.Join(os.Getenv("HOME"), ".kube", "config"))
 	//fmt.Println("kubeconfighome" + viper.GetString("kube-config-home"))
-	viper.SetDefault("configuration-files-path", path.Join(os.Getenv("HOME"), ".kube", "k8s_certs_and_templates_"+viper.GetString("cluster-name")))
-
+	viper.SetDefault("configuration-files-path", path.Join(os.Getenv("HOME"), ".launch", viper.GetString("cluster-name")))
+	viper.SetDefault("kube-config-home", path.Join(viper.GetString("configuration-files-path"), "kubeconfig"))
 	viper.SetDefault("template-path", path.Join(viper.GetString("configuration-files-path"), "templates"))
 	viper.SetDefault("certificate-path", path.Join(viper.GetString("configuration-files-path"), "k8s_certs"))
+	viper.SetDefault("ssh-key-name", "launch-"+viper.GetString("cluster-name"))
 	viper.SetDefault("minion-instance-type", "t2.micro")
 	viper.SetDefault("master-instance-type", "t2.micro")
 	viper.SetDefault("minion-root-volume-size", 50)
+
+	// Initial s3 bucket name generation
+	if !viper.IsSet("s3-ca-storage-bucket") {
+		globalConfig := path.Join(os.Getenv("HOME"), ".launch", "s3-ca-storage-bucketname.conf")
+
+		if _, errDefaultExists := os.Stat(globalConfig); os.IsNotExist(errDefaultExists) {
+			// global config does not exist yet
+			// generate a random bucket name
+			genUUID, _ := newUUID()
+			s3Name := "launch-certs" + genUUID
+			// write to global config
+			ioutil.WriteFile(globalConfig, []byte(s3Name), 0660)
+			viper.Set("s3-ca-storage-bucket", s3Name)
+		} else {
+			// Read global config
+			s3Bucket, _ := ioutil.ReadFile(globalConfig)
+			viper.Set("s3-ca-storage-bucket", string(s3Bucket))
+		}
+	}
 
 	// Unpack Asset helpers into the configured paths
 	errorCerts := RestoreAssets(viper.GetString("configuration-files-path"), "k8s_certs")
@@ -2085,6 +2202,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create SSH key if not exists.
+	// TODO: delete keypair on teardown
+	// TODO:
+	createSSHKey(svc)
+
 	// Ensure Security groups are created and authorized
 	authorize := false
 	masterSecurityGroupID := getSecurityGroup(svc, "Master")
@@ -2167,9 +2289,9 @@ func main() {
 			)
 
 			// upload certs to S3
-			putObjS3(*masterInstanceID+"-"+"apiserver.pem", apiPem)
-			putObjS3(*masterInstanceID+"-"+"apiserver-key.pem", apiKey)
-			putObjS3(*masterInstanceID+"-"+"ca.pem", ca)
+			putObjS3(viper.GetString("cluster-name")+"/"+*masterInstanceID+"-"+"apiserver.pem", apiPem)
+			putObjS3(viper.GetString("cluster-name")+"/"+*masterInstanceID+"-"+"apiserver-key.pem", apiKey)
+			putObjS3(viper.GetString("cluster-name")+"/"+*masterInstanceID+"-"+"ca.pem", ca)
 
 			// Associate Master with ELB
 			assocMasterWithELB(elbSvc, masterInstanceID)
@@ -2213,9 +2335,9 @@ func main() {
 			)
 
 			// upload certs to S3
-			putObjS3(*minionInstanceID+"-"+"minion.pem", minionPem)
-			putObjS3(*minionInstanceID+"-"+"minion-key.pem", minionKey)
-			putObjS3(*minionInstanceID+"-"+"ca.pem", minionCa)
+			putObjS3(viper.GetString("cluster-name")+"/"+*minionInstanceID+"-"+"minion.pem", minionPem)
+			putObjS3(viper.GetString("cluster-name")+"/"+*minionInstanceID+"-"+"minion-key.pem", minionKey)
+			putObjS3(viper.GetString("cluster-name")+"/"+*minionInstanceID+"-"+"ca.pem", minionCa)
 		}
 
 		// TODO: this will be moved into a more generic load addons feature as well

@@ -12,8 +12,6 @@ git clone https://github.com/bbcx/up
 cd up
 go get
 go build up.go bindata.go
-# Modify the config and change the settings that say CHANGEME
-cp config.toml.example config.toml
 ```
 
 ## Configure for AWS Region

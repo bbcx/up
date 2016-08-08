@@ -4,13 +4,7 @@ region="us-west-2"
 # AMI id
 ami="ami-d926ebb9"
 
-# SSH key name
-ssh-key-name="CHANGEME"
-
-# S3 is used for key distribution : prefix of "kubernetes-" for instances via IAM instance policy.
-s3-ca-storage-bucket="CHANGEME"
-
-# VPC
+# VPC address range.  Eg. A range between  172.16.0.0 - 172.31.255.255 
 vpc-cidr-block="172.31.0.0/16"
 
 # Subnets
@@ -20,7 +14,7 @@ subnet-1-cidr="172.31.1.0/24"
 subnet-2-cidr="172.31.2.0/24"
 
 # Tag lookup using Tag=KubernetesCluster=Value
-cluster-name="CHANGEME"
+cluster-name="launch-default"
 
 # The range kubernetes will use for the entire cluster.
 cluster-cidr="10.244.0.0/16"
@@ -40,4 +34,3 @@ minion-cluster-size="1"
 minion-instance-type="t2.micro"
 # Minion Root Volume size (in Gigabytes)
 minion-root-volume-size=100
-
