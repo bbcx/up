@@ -1745,7 +1745,7 @@ func waitForKubeOperational() {
 	done := false
 	fmt.Println("waiting for kubectl get nodes to exit successfully.")
 	for done == false {
-		_, errExec := exec.Command("kubectl", "get", "nodes").CombinedOutput()
+		_, errExec := exec.Command("kubectl", "get", "nodes", "--kubeconfig", viper.GetString("kube-config-home")).CombinedOutput()
 		if errExec != nil {
 			//fmt.Println(errExec)
 			//fmt.Println(string(out))
@@ -1760,8 +1760,8 @@ func waitForKubeOperational() {
 
 func loadDNSAddon() {
 	targetFileName := "kube-dns-" + viper.GetString("cluster-name") + ".yaml"
-	exec.Command("kubectl", "create", "namespace", "kube-system").CombinedOutput()
-	exec.Command("kubectl", "create", "-f", targetFileName).CombinedOutput()
+	exec.Command("kubectl", "create", "namespace", "kube-system", "--kubeconfig", viper.GetString("kube-config-home")).CombinedOutput()
+	exec.Command("kubectl", "create", "-f", targetFileName, "--kubeconfig", viper.GetString("kube-config-home")).CombinedOutput()
 }
 
 func deletePoliciesRoles() {
@@ -1894,7 +1894,27 @@ func deletePoliciesRoles() {
 }
 
 func main() {
-	viper.SetConfigName("config")
+
+	// Flags
+	var action = flag.String("action", "", "Action can be: init, launch-minion")
+	var confFile = flag.String("conf", "", "Path to config file")
+	flag.Parse()
+	switch *action {
+	case "init":
+	case "launch-minion":
+	case "delete":
+	case "generate-kube-config":
+	default:
+		fmt.Println("Usage:  up -action=<ACTION>  Please specify an action: init, launch-minion, delete.")
+		os.Exit(1)
+	}
+	if *confFile == "" {
+		viper.SetConfigName("config")
+	} else {
+		viper.SetConfigName(*confFile)
+		fmt.Println("loading viper config from " + *confFile)
+	}
+
 	viper.AddConfigPath(".")
 	viper.SetEnvPrefix("BB")
 	viper.AutomaticEnv()
@@ -1927,19 +1947,6 @@ func main() {
 	if errorTemplates != nil {
 		fmt.Println("Error writing template files")
 		fmt.Println(errorTemplates)
-		os.Exit(1)
-	}
-
-	// Flags
-	var action = flag.String("action", "", "Action can be: init, launch-minion")
-	flag.Parse()
-	switch *action {
-	case "init":
-	case "launch-minion":
-	case "delete":
-	case "generate-kube-config":
-	default:
-		fmt.Println("Usage:  up -action=<ACTION>  Please specify an action: init, launch-minion, delete.")
 		os.Exit(1)
 	}
 
