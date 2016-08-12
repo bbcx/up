@@ -2194,7 +2194,7 @@ func main() {
 	masterArn := checkPolicy("master")
 	if masterArn == nil {
 		masterArn = createPolicy(path.Join(templateDir, "kube-master-iam-policy.json"), "master")
-		fmt.Println("created policy: " + *masterArn)
+		fmt.Println("Created policy: " + *masterArn)
 		waitForPolicy = true
 	} else {
 		fmt.Println("found policy: " + *masterArn)
@@ -2203,7 +2203,7 @@ func main() {
 	minionArn := checkPolicy("minion")
 	if minionArn == nil {
 		minionArn = createPolicy(path.Join(templateDir, "kube-minion-iam-policy.json"), "minion")
-		fmt.Println("created policy: " + *minionArn)
+		fmt.Println("Created policy: " + *minionArn)
 		waitForPolicy = true
 	} else {
 		fmt.Println("found policy: " + *minionArn)
@@ -2213,7 +2213,7 @@ func main() {
 	instanceProfileArnMaster := checkRole(masterRoleName)
 	if instanceProfileArnMaster == nil {
 		instanceProfileArnMaster = createRole(masterArn, masterRoleName)
-		fmt.Println("created role: " + *instanceProfileArnMaster)
+		fmt.Println("Created role: " + *instanceProfileArnMaster)
 		waitForPolicy = true
 	} else {
 		fmt.Println("found role: " + *instanceProfileArnMaster)
@@ -2223,7 +2223,7 @@ func main() {
 	instanceProfileArnMinion := checkRole(minionRoleName)
 	if instanceProfileArnMinion == nil {
 		instanceProfileArnMinion = createRole(minionArn, minionRoleName)
-		fmt.Println("created role: " + *instanceProfileArnMinion)
+		fmt.Println("Created role: " + *instanceProfileArnMinion)
 		waitForPolicy = true
 	} else {
 		fmt.Println("found role: " + *instanceProfileArnMinion)
@@ -2247,12 +2247,12 @@ func main() {
 	// Create SSH key if not exists.
 	createSSHKey(svc)
 
-	// Ensure Security groups are created and authorized
+	// Ensure Security groups are Created and authorized
 	authorize := false
 	masterSecurityGroupID := getSecurityGroup(svc, "Master")
 	if masterSecurityGroupID == nil {
 		masterSecurityGroupID = createSecurityGroup(svc, "Master", vpcID)
-		fmt.Println("created master security group: " + *masterSecurityGroupID)
+		fmt.Println("Created master security group: " + *masterSecurityGroupID)
 		authorize = true
 	} else {
 		fmt.Println("found master security group: " + *masterSecurityGroupID)
@@ -2260,7 +2260,7 @@ func main() {
 	minionSecurityGroupID := getSecurityGroup(svc, "Minion")
 	if minionSecurityGroupID == nil {
 		minionSecurityGroupID = createSecurityGroup(svc, "Minion", vpcID)
-		fmt.Println("created minion security group: " + *minionSecurityGroupID)
+		fmt.Println("Created minion security group: " + *minionSecurityGroupID)
 		authorize = true
 	} else {
 		fmt.Println("found minion security group: " + *minionSecurityGroupID)
@@ -2269,7 +2269,7 @@ func main() {
 	ELBSecurityGroupID := getSecurityGroup(svc, "ELB")
 	if ELBSecurityGroupID == nil {
 		ELBSecurityGroupID = createSecurityGroup(svc, "ELB", vpcID)
-		fmt.Println("created master ELB security group: " + *ELBSecurityGroupID)
+		fmt.Println("Created master ELB security group: " + *ELBSecurityGroupID)
 		authorize = true
 	} else {
 		fmt.Println("found master ELB security group: " + *ELBSecurityGroupID)
@@ -2283,7 +2283,7 @@ func main() {
 	elbDNSName := getELBDNSName(elbSvc)
 	if elbDNSName == nil {
 		elbDNSName = createELB(svc, elbSvc, vpcID)
-		fmt.Println("created ELB for " + viper.GetString("elb-name") + ": " + *elbDNSName)
+		fmt.Println("Created ELB for " + viper.GetString("elb-name") + ": " + *elbDNSName)
 	} else {
 		fmt.Println("found ELB DNS name: " + *elbDNSName)
 	}
@@ -2347,6 +2347,10 @@ func main() {
 
 		generateUserLaptopKubeConfig(kubeConfigValues)
 		fmt.Println("kubectl config written to: " + viper.GetString("kube-config-home"))
+		fmt.Println("cluster starting up")
+		fmt.Println("\n***")
+		fmt.Println("To manage with kubectl set the environment variable: export KUBECONFIG=" + viper.GetString("kube-config-home"))
+		fmt.Println("***\n")
 		generateSkyDNSConfig(kubeConfigValues)
 	}
 
