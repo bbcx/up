@@ -196,6 +196,22 @@ func getDNSName(svc *elb.ELB) *string {
 	return resp.LoadBalancerDescriptions[0].DNSName
 }
 
+func getLatestAmi() string {
+	resp, err := http.Get(viper.GetString("ami-update-url") + viper.GetString("region"))
+	if err != nil {
+		fmt.Println("Error: Could not get latest ami")
+		return ""
+	}
+	defer resp.Body.Close()
+	//body, err := ioutil.ReadAll(resp.Body)
+
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(resp.Body)
+
+	s := buf.String()
+	return s
+}
+
 func getEtcdDiscoveryService(size string) string {
 	resp, err := http.Get("https://discovery.etcd.io/new?size=" + size)
 	if err != nil {
@@ -1537,6 +1553,21 @@ func deleteIGW(svc *ec2.EC2) bool {
 	return true
 }
 
+func deleteSSHKey(svc *ec2.EC2) bool {
+	deleteParams := &ec2.DeleteKeyPairInput{
+		KeyName: aws.String(viper.GetString("ssh-key-name")),
+	}
+	_, err := svc.DeleteKeyPair(deleteParams)
+	if err != nil {
+		fmt.Println("Error deleting keypair")
+		fmt.Println(err)
+		return false
+	} else {
+		fmt.Println("Deleted keypair: " + viper.GetString("ssh-key-name"))
+		return true
+	}
+}
+
 func deleteIGWRetry(svc *ec2.EC2, IGWID *string, retryCount int64) bool {
 	paramsDelete := &ec2.DeleteInternetGatewayInput{
 		InternetGatewayId: IGWID,
@@ -1943,8 +1974,10 @@ func createSSHKey(svc *ec2.EC2) bool {
 		handleError(errCreate, "Error creating ssh key pair")
 
 		keyFileName := path.Join(os.Getenv("HOME"), ".launch", viper.GetString("cluster-name"), "id_rsa")
+		fmt.Println("Create SSH keypair: " + viper.GetString("ssh-key-name") + " location " + keyFileName)
+
 		keyMaterial := []byte(*respCreate.KeyMaterial)
-		handleError(ioutil.WriteFile(keyFileName, keyMaterial, 0400), "error writing to "+keyFileName)
+		handleError(ioutil.WriteFile(keyFileName, keyMaterial, 0600), "error writing to "+keyFileName)
 
 		// Nice to have but not necessary at all, public key generation.
 		//block, _ := pem.Decode(keyMaterial)
@@ -2023,8 +2056,14 @@ func main() {
 	}
 
 	viper.SetDefault("elb-name", "k8s-master-"+viper.GetString("cluster-name"))
+	viper.SetDefault("ami-update-url", "https://blackbird.cx/amis/latest/")
 	// Set default path to kube config file and certificate store
 	//fmt.Println("kubeconfighome" + viper.GetString("kube-config-home"))
+	latestAMI := getLatestAmi()
+	if latestAMI != "" {
+		viper.SetDefault("ami", latestAMI)
+	}
+
 	viper.SetDefault("configuration-files-path", path.Join(os.Getenv("HOME"), ".launch", viper.GetString("cluster-name")))
 	viper.SetDefault("kube-config-home", path.Join(viper.GetString("configuration-files-path"), "kubeconfig"))
 	viper.SetDefault("template-path", path.Join(viper.GetString("configuration-files-path"), "templates"))
@@ -2102,6 +2141,9 @@ func main() {
 		fmt.Println()
 
 		deleteSecGroupsExtra(svc)
+
+		// SSH Key
+		deleteSSHKey(svc)
 
 		// IGW (tagged)
 		deleteIGW(svc)
@@ -2203,8 +2245,6 @@ func main() {
 	}
 
 	// Create SSH key if not exists.
-	// TODO: delete keypair on teardown
-	// TODO:
 	createSSHKey(svc)
 
 	// Ensure Security groups are created and authorized

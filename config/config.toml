@@ -1,8 +1,8 @@
 # Aws Region
 region="us-west-2"
 
-# AMI id
-ami="ami-d926ebb9"
+# Override AMI id
+#ami="ami-d926ebb9"
 
 # VPC address range.  Eg. A range between  172.16.0.0 - 172.31.255.255 
 vpc-cidr-block="172.31.0.0/16"
