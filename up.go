@@ -445,7 +445,7 @@ func createS3Bucket() {
 	if err != nil {
 		// Print the error, cast err to awserr.Error to get the Code and
 		// Message from an error.
-		//fmt.Println(err.Error())
+		fmt.Println(err.Error())
 		//fmt.Println("S3 bucket already exists.  Continuing.")
 		return
 	}
