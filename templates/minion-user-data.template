@@ -1,5 +1,10 @@
 #cloud-config
 write_files:
+  - path: /var/run/ec2/metadata/publicipv4
+    owner: root
+    permissions: 0755
+    content: |
+      $public_ipv4
   - path: /usr/local/bin/get_k8s_certs.sh
     owner: root
     permissions: 0755
@@ -30,12 +35,12 @@ write_files:
       KUBELET_ADDRESS="--address=$private_ipv4"
       KUBELET_HOSTNAME="--hostname-override=$private_ipv4"
       KUBELET_API_SERVER="--api-servers=https://{{.ELBDNSName}}"
-      KUBELET_ARGS="--cloud-provider=aws --kubeconfig=/var/lib/kubelet/kubeconfig --non-masquerade-cidr=10.0.0.0/8 --cluster-dns={{.ClusterDNS}} --configure-cbr0=true --cluster-domain=cluster.local --tls-cert-file=/etc/kubernetes/ssl/minion.pem --tls-private-key-file=/etc/kubernetes/ssl/minion-key.pem"
+      KUBELET_ARGS="--cloud-provider=aws --kubeconfig=/var/lib/kubelet/kubeconfig --non-masquerade-cidr=10.0.0.0/8 --cluster-dns={{.ClusterDNS}} --configure-cbr0=true --cluster-domain=cluster.local --tls-cert-file=/etc/kubernetes/ssl/minion.pem --tls-private-key-file=/etc/kubernetes/ssl/minion-key.pem --container-runtime=docker"
   - path: /etc/kubernetes/proxy
     owner: root
     permissions: 0755
     content: |
-      KUBE_PROXY_ARGS="--cluster-cidr={{.ClusterCIDR}} --proxy-mode=iptables --kubeconfig=/var/lib/kubelet/kubeconfig"
+      KUBE_PROXY_ARGS="--cluster-cidr={{.ClusterCIDR}} --proxy-mode=iptables --kubeconfig=/var/lib/kubelet/kubeconfig --conntrack-max=0 --conntrack-max-per-core=0 --conntrack-tcp-timeout-established=0"
   - path: /var/lib/kubelet/kubeconfig
     owner: root
     permissions: 0755
@@ -60,6 +65,8 @@ write_files:
             client-key: /etc/kubernetes/ssl/minion-key.pem
 coreos:
   units:
+    - name: systemd-journal-gatewayd.service
+      command: start
     - name: docker.service
       command: start
       content: |
@@ -70,14 +77,25 @@ coreos:
         Requires=docker.socket
         [Service]
         Type=notify
-        ExecStartPre=-/usr/bin/brctl addbr cbr0
-        ExecStart=/usr/bin/docker daemon -H fd:// -s=overlay --bridge=cbr0 --iptables=false --ip-masq=false --log-level=warn 
-        MountFlags=slave
-        LimitNOFILE=1048576
-        LimitNPROC=1048576
+        # the default is not to use systemd for cgroups because the delegate issues still
+        # exists and systemd currently does not support the cgroup feature set required
+        # for containers run by docker
+        ExecStartPre=-/usr/bin/brctl addbr cbr0     
+        ExecStart=/usr/bin/docker daemon -H fd:// --log-driver=journald -s=overlay --bridge=cbr0 --iptables=false --ip-masq=false --log-level=warn
+        ExecReload=/bin/kill -s HUP $MAINPID
+        # Having non-zero Limit*s causes performance problems due to accounting overhead
+        # in the kernel. We recommend using cgroups to do container-local accounting.
+        LimitNOFILE=infinity
+        LimitNPROC=infinity
         LimitCORE=infinity
+        # Uncomment TasksMax if your systemd version supports it.
+        # Only systemd 226 and above support this version.
+        #TasksMax=infinity
         TimeoutStartSec=0
+        # set delegate yes so that systemd does not reset the cgroups of docker containers
         Delegate=yes
+        # kill only the docker process, not all processes in the cgroup
+        KillMode=process
         [Install]
         WantedBy=multi-user.target
     - name: get-k8s-certs.service

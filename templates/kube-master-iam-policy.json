@@ -3,7 +3,22 @@
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["ec2:*"],
+      "Action": ["ec2:Describe*"],
+      "Resource": ["*"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["ec2:ModifyInstanceAttribute"],
+      "Resource": ["*"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["ec2:CreateRoute"],
+      "Resource": ["*"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["ec2:DeleteRoute"],
       "Resource": ["*"]
     },
     {

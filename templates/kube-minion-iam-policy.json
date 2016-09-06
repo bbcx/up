@@ -16,25 +16,22 @@
     {
       "Effect": "Allow",
       "Action": "ec2:AttachVolume",
-      "Resource": "*"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals" : {
+        "ec2:ResourceTag/KubernetesCluster" : "{{.ClusterName}}"
+        }
+      }
     },
     {
       "Effect": "Allow",
       "Action": "ec2:DetachVolume",
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ecr:GetAuthorizationToken",
-        "ecr:BatchCheckLayerAvailability",
-        "ecr:GetDownloadUrlForLayer",
-        "ecr:GetRepositoryPolicy",
-        "ecr:DescribeRepositories",
-        "ecr:ListImages",
-        "ecr:BatchGetImage"
-      ],
-      "Resource": "*"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals" : {
+        "ec2:ResourceTag/KubernetesCluster" : "{{.ClusterName}}"
+        }
+      }
     }
   ]
 }

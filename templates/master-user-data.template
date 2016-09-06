@@ -32,7 +32,7 @@ write_files:
       KUBE_ADMISSION_CONTROL="--admission-control=NamespaceLifecycle,NamespaceExists,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota"
       
       # Additional args to the apiserver (SSL)
-      KUBE_API_ARGS="--cloud-provider=aws --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem --advertise-address=$private_ipv4 --tls-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem --client-ca-file=/etc/kubernetes/ssl/ca.pem --service-account-key-file=/etc/kubernetes/ssl/apiserver-key.pem"
+      KUBE_API_ARGS="--apiserver-count={{.ApiServerCount}} --cloud-provider=aws --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem --advertise-address=$private_ipv4 --tls-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem --client-ca-file=/etc/kubernetes/ssl/ca.pem --service-account-key-file=/etc/kubernetes/ssl/apiserver-key.pem"
       
   - path: "/etc/kubernetes/config"
     permissions: "0644"
@@ -83,6 +83,30 @@ write_files:
       LimitNOFILE=40000
       [Install]
       WantedBy=multi-user.target
+  - path: /root/logcollector.sh
+    owner: root
+    permissions: 0755
+    content: |
+      #!/bin/bash -e
+      # Starts cluster log collection into collective journal /var/log/journal/k8s
+      # To tail: journalctl -fn --directory /var/log/journal/k8s
+      if [ "$1" = "" ]; then
+        echo "Usage: logcollector.sh <dump | follow>"
+      fi
+      pacman -Sy --noconfirm jq
+      export AWS_DEFAULT_REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document |jq -r .region)
+      mkdir -p /var/log/journal/k8s
+      if [ "$1" = "follow" ]; then
+        echo following logs and recording to /var/log/journal/k8s
+        FOLLOWIT="follow"
+      else
+        echo starting one time dump of logs into /var/log/journal/k8s
+        FOLLOWIT=""
+      fi
+      set +e
+      for ip in $(aws ec2 describe-instances |jq -r '.Reservations[].Instances[] | .PrivateIpAddress + " " + .PublicIpAddress + " " + .Tags[].Value + " " + .InstanceId + " " + .State.Name'  |grep running |cut -f1 -d " " |sort -u); do
+        /usr/lib/systemd/systemd-journal-remote --url http://${ip}:19531/entries?${FOLLOWIT} --output /var/log/journal/k8s --split-mode host &
+      done
 coreos:
   etcd2:
     discovery: {{.Discovery}} 
@@ -91,6 +115,8 @@ coreos:
     listen-client-urls: http://0.0.0.0:2379,http://0.0.0.0:4001
     listen-peer-urls: http://$private_ipv4:2380
   units:
+    - name: systemd-journal-gatewayd.service
+      command: start
     - name: etcd2.service
       command: start
     - name: get-k8s-certs.service

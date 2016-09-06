@@ -4,6 +4,10 @@ region="us-west-2"
 # Override AMI id
 #ami="ami-d926ebb9"
 
+# define VPC base !
+#vpc-base="172.31"
+# then the rest of these lame settings can get defaulted to /16 and /24
+
 # VPC address range.  Eg. A range between  172.16.0.0 - 172.31.255.255 
 vpc-cidr-block="172.31.0.0/16"
 

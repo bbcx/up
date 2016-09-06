@@ -36,6 +36,7 @@ type templateValuesForUserData struct {
 	ELBDNSName            string
 	Discovery             string
 	SSLStorageBucket      string
+	ApiServerCount        string
 }
 
 type sslConf struct {
@@ -274,6 +275,7 @@ func assocMasterWithELB(svc *elb.ELB, instanceID *string) {
 }
 
 func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcID *string) *string {
+
 	masterSecurityGroupID := getSecurityGroup(svc, "Master")
 
 	if masterSecurityGroupID == nil {
@@ -313,63 +315,89 @@ func launchMaster(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 
 	tagIt(svc, resp.Instances[0].InstanceId)
 	tagName(svc, resp.Instances[0].InstanceId, "k8sMaster-"+viper.GetString("cluster-name"))
+
+	paramsMod := &ec2.ModifyInstanceAttributeInput{
+		InstanceId: resp.Instances[0].InstanceId,
+		SourceDestCheck: &ec2.AttributeBooleanValue{
+			Value: aws.Bool(false),
+		},
+	}
+	_, errMod := svc.ModifyInstanceAttribute(paramsMod)
+
+	handleError(errMod, "Failed to modify-instance-attribute for source-dest-check=false (required by K8S networking)")
+
 	// Pretty-print the response data
 	return resp.Instances[0].InstanceId
 }
 
-// Add KubernetesCluster=<clustername> tag to a resource
-func tagIt(svc *ec2.EC2, ID *string) bool {
-	time.Sleep(10)
+func tagIt(svc *ec2.EC2, ID *string) {
+	tagItExtra(svc, ID, "KubernetesCluster", viper.GetString("cluster-name"))
+}
+
+func tagItExtra(svc *ec2.EC2, ID *string, tagKey string, tagValue string) bool {
+	tagItRetry(svc, ID, tagKey, tagValue, 0)
+	return true
+}
+
+// Re-try incase of aws failure to recognize new resource ID.
+func tagItRetry(svc *ec2.EC2, ID *string, tagKey string, tagValue string, retryCount int64) bool {
+	retryCount++
+
 	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
 		Resources: []*string{ID},
 		Tags: []*ec2.Tag{
 			{
-				Key:   aws.String("KubernetesCluster"),
-				Value: aws.String(viper.GetString("cluster-name")),
+				Key:   aws.String(tagKey),
+				Value: aws.String(tagValue),
 			},
 		},
 	})
 	if errtag != nil {
-		fmt.Println("Could not create tags for ", *ID, errtag)
-		return false
+		if awsErr, ok := errtag.(awserr.Error); ok {
+			fmt.Println("Retrying aws Code: " + awsErr.Code())
+		} else {
+			fmt.Println(errtag)
+		}
+		if retryCount > 20 {
+			haltOnError(errtag, "Aborted: Maximum retries reached for tagging "+*ID)
+		}
+		time.Sleep(time.Second * 5)
+		tagItRetry(svc, ID, tagKey, tagValue, retryCount)
 	}
 	return true
 }
 
-func tagFor(svc *ec2.EC2, ID *string, tagFor string) bool {
-	time.Sleep(10)
-	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
-		Resources: []*string{ID},
-		Tags: []*ec2.Tag{
-			{
-				Key:   aws.String("for"),
-				Value: aws.String(tagFor),
-			},
-		},
-	})
-	if errtag != nil {
-		fmt.Println("Could not create tags for ", *ID, errtag)
-		return false
-	}
-	return true
+func tagFor(svc *ec2.EC2, ID *string, tagFor string) {
+	tagItExtra(svc, ID, "for", tagFor)
 }
 
 // Add Name= tag to a resource
-func tagName(svc *ec2.EC2, ID *string, name string) bool {
-	_, errtag := svc.CreateTags(&ec2.CreateTagsInput{
-		Resources: []*string{ID},
-		Tags: []*ec2.Tag{
-			{
-				Key:   aws.String("Name"),
-				Value: aws.String(name),
-			},
-		},
-	})
-	if errtag != nil {
-		fmt.Println("Could not create tags for ", *ID, errtag)
-		return false
+func tagName(svc *ec2.EC2, ID *string, name string) {
+	tagItExtra(svc, ID, "Name", name)
+}
+
+// Handle various AWS errors
+func errorCode(err error) (errorCode *string) {
+	if awsErr, ok := err.(awserr.Error); ok {
+		// Eg, "DependencyViolation"
+		newCode := awsErr.Code()
+		return &newCode
 	}
-	return true
+	return nil
+}
+
+// If an error happened, halt and print this message.
+func haltOnError(err error, message string) {
+	if err != nil {
+		fmt.Println(err)
+		haltError(message)
+	}
+}
+
+// Print message to stderr and exit.
+func haltError(message string) {
+	os.Stderr.WriteString(message)
+	os.Exit(1)
 }
 
 func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcID *string) (*string, *string) {
@@ -422,6 +450,16 @@ func launchMinion(svc *ec2.EC2, userData string, instanceProfileArn string, vpcI
 
 	tagIt(svc, resp.Instances[0].InstanceId)
 	tagName(svc, resp.Instances[0].InstanceId, "k8sMinion-"+viper.GetString("cluster-name"))
+
+	paramsMod := &ec2.ModifyInstanceAttributeInput{
+		InstanceId: resp.Instances[0].InstanceId,
+		SourceDestCheck: &ec2.AttributeBooleanValue{
+			Value: aws.Bool(false),
+		},
+	}
+	_, errMod := svc.ModifyInstanceAttribute(paramsMod)
+
+	handleError(errMod, "Failed to modify-instance-attribute for source-dest-check=false (required by K8S networking)")
 
 	return resp.Instances[0].PrivateIpAddress, resp.Instances[0].InstanceId
 }
@@ -2023,9 +2061,10 @@ func main() {
 	case "init":
 	case "launch-minion":
 	case "delete":
+	case "park":
 	case "generate-kube-config":
 	default:
-		fmt.Println("Usage:  up -action=<ACTION>  Please specify an action: init, launch-minion, delete.")
+		fmt.Println("Usage:  up -action=<ACTION>  Please specify an action: init, launch-minion, delete, park.")
 		os.Exit(1)
 	}
 
@@ -2108,6 +2147,12 @@ func main() {
 
 	svc := ec2.New(session.New(), &aws.Config{Region: aws.String(viper.GetString("region"))})
 	elbSvc := elb.New(session.New(), &aws.Config{Region: aws.String(viper.GetString("region"))})
+
+	if *action == "park" {
+		deleteInstances(svc)
+		fmt.Println("Instances terminated.  Cluster parked.")
+		os.Exit(0)
+	}
 
 	if *action == "delete" {
 		/* fmt.Printf("Tearing down K8S cluster for tag: %s\n", viper.GetString("cluster-name"))
@@ -2304,6 +2349,7 @@ func main() {
 		*elbDNSName,
 		discovery,
 		viper.GetString("s3-ca-storage-bucket"),
+		viper.GetString("master-cluster-size"),
 	}
 
 	if *action == "init" {
