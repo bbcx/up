@@ -12,19 +12,40 @@ git clone https://github.com/bbcx/up
 cd up
 go get
 go build up.go bindata.go
-```
-
-## Configure for AWS Region
-If you're in a different region than us-west-2 choose the AMI for your region from the latest [release](https://blackbird.cx/post/blackbirdos-releases.html).
+``` 
 
 ## Launching K8S
 ```
 ./up -action=init
 ```
 
-## Adding a Minion to the cluster
+## Configuration
+Up can manage multiple clusters.  The first cluster you launch will be called "launch-default"
+
+All configuration files, templates and ssl certificates for the clusters are stored in ```$HOME/.launch/```
+
+Up will take care of picking configuration values automatically when you init a new cluster.  In the event you need to configure things (such as the VPC cidrs) the configuration can be found in ```$HOME/.launch/<NAME OF CLUSTER>/config/config.toml```  
+
+At this time, it's best to run the init and let it fail if the CIDR needs config.  *then edit the config.
+
+## Adding Minion(s) to the cluster
+The number of minions launched and type of instance is determined by the configuration at $HOME/.launch/<NAME OF CLUSTER>/config/config.toml
+
+```
+# Minion Cluster Size
+minion-cluster-size="1"
+minion-instance-type="t2.micro"
+```
+
 ```
 ./up -action=launch-minion
+```
+
+## Parking K8S
+With Up you can simply terminate the instances but leave all the aws resources.  This speeds up the process re-upping.
+
+```
+./up -action=park
 ```
 
 ## Deleting K8S
