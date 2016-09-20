@@ -2054,8 +2054,8 @@ func newUUID() (string, error) {
 func main() {
 
 	// Flags
-	var action = flag.String("action", "", "Action can be: init, launch-minion")
-	var confFile = flag.String("conf", "", "Path to config file")
+	var action = flag.String("action", "", "Action can be: init, launch-minion, delete, park")
+	var clusterNameOverride = flag.String("cluster", "", "Cluster name, optional, default: launch-default")
 	flag.Parse()
 	switch *action {
 	case "init":
@@ -2064,7 +2064,7 @@ func main() {
 	case "park":
 	case "generate-kube-config":
 	default:
-		fmt.Println("Usage:  up -action=<ACTION>  Please specify an action: init, launch-minion, delete, park.")
+		fmt.Println("Usage:  up -action=<ACTION> -cluster=<NAME>  Please specify an action: init, launch-minion, delete, park.")
 		os.Exit(1)
 	}
 
@@ -2080,10 +2080,10 @@ func main() {
 
 	viper.SetConfigName("config")
 
-	if *confFile == "" {
+	if *clusterNameOverride == "" {
 		viper.AddConfigPath(path.Join(defaultConfigFilePath, "config"))
 	} else {
-		viper.AddConfigPath(*confFile)
+		viper.AddConfigPath(path.Join(os.Getenv("HOME"), ".launch", *clusterNameOverride, "config"))
 	}
 
 	viper.SetEnvPrefix("BB")
